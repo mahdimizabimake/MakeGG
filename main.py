@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sqlite3
-import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -21,10 +20,8 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN not set")
 
-# مراحل مکالمه
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 
-# ========== SQLite ==========
 DB_PATH = "user_data.db"
 
 def init_db_sync():
@@ -122,7 +119,7 @@ async def get_last_dialogs(user_id):
         result = []
         for d in dialogs:
             if d.is_user:
-                title = d.name or d.entity.first_name or str(d.id)
+                title = d.name or (d.entity.first_name if d.entity else str(d.id))
             else:
                 title = d.title or str(d.id)
             result.append((d.id, title))
@@ -246,7 +243,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف با لیست دکمه‌ای (اصلاح شده) ----------
+# ---------- تنظیم چت هدف ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -265,7 +262,6 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for chat_id, title in dialogs:
         short_title = title[:30] + "..." if len(title) > 30 else title
-        # استفاده از جداکننده | برای جلوگیری از تداخل با کاراکتر _
         callback_data = f"select_chat|{chat_id}|{title[:50]}"
         buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=callback_data)])
     buttons.append([InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")])
@@ -365,45 +361,74 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(user_id, session_string="")
     await query.edit_message_text("✅ از اکانت خود خارج شدید.")
 
-# ---------- هندلر فایل ----------
+# ========== هندلر فایل با پیام وضعیت ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    data = await get_user_data(user_id)
-    if not data or not data['session_string'] or not data['target_chat_id']:
-        await update.message.reply_text("❌ ابتدا لاگین کنید و چت هدف را تنظیم نمایید. /start")
-        return
-    session_string = data['session_string']
-    api_id = data['api_id']
-    api_hash = data['api_hash']
-    target_chat_id = data['target_chat_id']
-    file = await update.message.effective_attachment
-    if not file:
-        await update.message.reply_text("لطفاً یک فایل صوتی یا ویدیویی بفرستید.")
-        return
-    duration = getattr(file, 'duration', 3) or 3
-    file_path = await file.get_file().download_to_drive()
-    client = TelegramClient(StringSession(session_string), api_id, api_hash)
-    await client.connect()
+    status_msg = await update.message.reply_text("🔄 در حال بررسی درخواست...")
     try:
-        target_entity = await client.get_entity(target_chat_id)
+        data = await get_user_data(user_id)
+        if not data or not data['session_string']:
+            await status_msg.edit_text("❌ شما لاگین نیستید. لطفاً از منوی اصلی لاگین کنید.")
+            return
+        if not data['target_chat_id']:
+            await status_msg.edit_text("❌ چت هدف تنظیم نشده. ابتدا از منوی اصلی چت هدف را انتخاب کنید.")
+            return
+        
+        session_string = data['session_string']
+        api_id = data['api_id']
+        api_hash = data['api_hash']
+        target_chat_id = data['target_chat_id']
+        
+        file = update.message.effective_attachment
+        if not file:
+            await status_msg.edit_text("❌ فایلی یافت نشد.")
+            return
+        
+        # استخراج مدت زمان
+        duration = getattr(file, 'duration', None)
+        if not duration and hasattr(file, 'document') and hasattr(file.document, 'attributes'):
+            for attr in file.document.attributes:
+                if hasattr(attr, 'duration'):
+                    duration = attr.duration
+                    break
+        if not duration:
+            duration = 3
+        
+        # تشخیص نوع فایل
         mime_type = getattr(file, 'mime_type', '')
-        if mime_type.startswith('audio/') or 'Audio' in str(type(file)):
-            await send_as_voice_note(client, target_entity, file_path, duration)
-            await update.message.reply_text(f"🎙️ ویس نوت ارسال شد ({duration} ثانیه)")
-        elif mime_type.startswith('video/') or 'Video' in str(type(file)):
-            await send_as_video_note(client, target_entity, file_path, duration)
-            await update.message.reply_text(f"📹 ویدیو نوت ارسال شد ({duration} ثانیه)")
-        else:
-            await update.message.reply_text("❌ فقط فایل‌های صوتی یا ویدیویی پشتیبانی می‌شوند.")
-    except FloodWaitError as e:
-        await update.message.reply_text(f"⏳ محدودیت تلگرام: {e.seconds} ثانیه صبر کنید")
+        is_audio = mime_type.startswith('audio/') or isinstance(file, (filters.AUDIO, filters.VOICE)) or 'Audio' in str(type(file))
+        is_video = mime_type.startswith('video/') or isinstance(file, filters.VIDEO) or 'Video' in str(type(file))
+        
+        if not is_audio and not is_video:
+            await status_msg.edit_text("❌ فرمت فایل پشتیبانی نمی‌شود. فقط فایل‌های صوتی و ویدیویی.")
+            return
+        
+        await status_msg.edit_text("📥 در حال دانلود فایل...")
+        file_path = await file.get_file().download_to_drive()
+        
+        client = TelegramClient(StringSession(session_string), api_id, api_hash)
+        await client.connect()
+        try:
+            target_entity = await client.get_entity(target_chat_id)
+            await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو'} با اکشن ضبط...")
+            if is_audio:
+                await send_as_voice_note(client, target_entity, file_path, duration)
+                await status_msg.edit_text(f"✅ ویس نوت با موفقیت ارسال شد (مدت {duration} ثانیه)")
+            else:
+                await send_as_video_note(client, target_entity, file_path, duration)
+                await status_msg.edit_text(f"✅ ویدیو نوت با موفقیت ارسال شد (مدت {duration} ثانیه)")
+        except FloodWaitError as e:
+            await status_msg.edit_text(f"⏳ محدودیت تلگرام: {e.seconds} ثانیه صبر کنید.")
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا در ارسال: {str(e)}")
+        finally:
+            await client.disconnect()
+            if os.path.exists(file_path):
+                os.remove(file_path)
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در ارسال: {str(e)}")
-    finally:
-        await client.disconnect()
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        await status_msg.edit_text(f"❌ خطای غیرمنتظره: {str(e)}")
 
+# ---------- دستورات عمومی ----------
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
@@ -427,7 +452,7 @@ async def run_web():
 async def main():
     await init_db()
     application = Application.builder().token(BOT_TOKEN).build()
-    # مکالمه لاگین
+    # لاگین
     login_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -440,7 +465,7 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(login_conv)
-    # مکالمه تنظیم چت هدف
+    # تنظیم چت هدف
     target_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
@@ -452,11 +477,11 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(target_conv)
-    # دکمه‌های دیگر
     application.add_handler(CallbackQueryHandler(status_callback, pattern='^status$'))
     application.add_handler(CallbackQueryHandler(logout_callback, pattern='^logout$'))
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.AUDIO | filters.VIDEO | filters.VOICE | filters.VIDEO_NOTE, handle_file))
+    
     await application.initialize()
     await application.start()
     asyncio.create_task(application.updater.start_polling())
