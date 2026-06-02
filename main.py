@@ -25,16 +25,15 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 if not BOT_TOKEN or not DATABASE_URL:
     raise Exception("BOT_TOKEN and DATABASE_URL required")
 
-# Conversation states
+# مراحل مکالمه
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
-REPLY_METHOD_STATE, REPLY_LINK_STATE, REPLY_SELECT_MSG_STATE = range(6, 9)
+REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE = range(6, 9)
 
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
 async def init_db():
     async with await get_conn() as conn:
-        # Base table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_data (
                 user_id BIGINT PRIMARY KEY,
@@ -46,7 +45,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
-        # Add missing columns if needed
         async with conn.cursor() as cur:
             await cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='user_data'")
             columns = [row[0] for row in await cur.fetchall()]
@@ -54,12 +52,14 @@ async def init_db():
                 await conn.execute("ALTER TABLE user_data ADD COLUMN reply_msg_id INTEGER DEFAULT NULL")
             if 'reply_active' not in columns:
                 await conn.execute("ALTER TABLE user_data ADD COLUMN reply_active BOOLEAN DEFAULT FALSE")
+            if 'reply_chat_id' not in columns:
+                await conn.execute("ALTER TABLE user_data ADD COLUMN reply_chat_id BIGINT DEFAULT NULL")
         await conn.commit()
 
 async def get_user_data(user_id):
     async with await get_conn() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute('SELECT api_id, api_hash, session_string, target_chat_id, target_chat_title, reply_msg_id, reply_active FROM user_data WHERE user_id = %s', (user_id,))
+            await cur.execute('SELECT api_id, api_hash, session_string, target_chat_id, target_chat_title, reply_msg_id, reply_active, reply_chat_id FROM user_data WHERE user_id = %s', (user_id,))
             return await cur.fetchone()
 
 async def save_user_data(user_id, api_id=None, api_hash=None, session_string=None, target_chat_id=None, target_chat_title=None):
@@ -90,19 +90,19 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-async def set_reply(user_id, msg_id, active=True):
+async def set_reply(user_id, chat_id, msg_id, active=True):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute('UPDATE user_data SET reply_msg_id = %s, reply_active = %s WHERE user_id = %s', (msg_id, active, user_id))
+            await cur.execute('UPDATE user_data SET reply_chat_id = %s, reply_msg_id = %s, reply_active = %s WHERE user_id = %s', (chat_id, msg_id, active, user_id))
             await conn.commit()
 
 async def clear_reply(user_id):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute('UPDATE user_data SET reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
+            await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# Video conversion (crop to square, no black bars)
+# تبدیل ویدیو به مربع بدون حاشیه
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
@@ -119,7 +119,7 @@ async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
         raise Exception(f"ffmpeg error: {stderr.decode()}")
     return output_path
 
-# Telethon helpers
+# توابع Telethon
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
@@ -155,6 +155,7 @@ async def send_as_video_note(client, chat, file_path, duration, reply_to=None):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False, reply_to=reply_to)
 
+# گرفتن ۱۰ دیالوگ آخر
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -171,6 +172,7 @@ async def get_last_dialogs(user_id):
     finally:
         await client.disconnect()
 
+# گرفتن ۱۰ پیام آخر یک چت
 async def get_last_messages(user_id, chat_id, limit=10):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -192,17 +194,19 @@ async def get_last_messages(user_id, chat_id, limit=10):
         messages = []
         for msg in history.messages:
             if isinstance(msg, Message):
-                text = msg.text or msg.message or "(رسانه)"
+                text = msg.text or msg.message or ""
                 if not text:
                     text = "📷 رسانه" if msg.media else "پیام خالی"
-                messages.append((msg.id, text[:40] + "..." if len(text) > 40 else text))
+                # فقط ۲۰ کاراکتر اول
+                short_text = text[:20] + "..." if len(text) > 20 else text
+                messages.append((msg.id, short_text))
         return messages, None
     except Exception as e:
         return None, f"خطا: {str(e)}"
     finally:
         await client.disconnect()
 
-# Main menu
+# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
@@ -214,7 +218,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text += "❌ چت هدف تنظیم نشده\n"
         if data.get('reply_active') and data.get('reply_msg_id'):
-            text += f"🔁 ریپلی فعال به پیام ID: `{data['reply_msg_id']}`\n"
+            text += f"🔁 ریپلی فعال به پیام ID `{data['reply_msg_id']}` در چت `{data.get('reply_chat_id')}`\n"
         else:
             text += "🔁 ریپلی: غیرفعال\n"
     else:
@@ -228,7 +232,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- Login conversation (unchanged) ----------
+# ---------- مکالمه لاگین (بدون تغییر) ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -312,7 +316,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- Set target chat ----------
+# ---------- تنظیم چت هدف (همان قبل، بدون تغییر) ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -393,26 +397,27 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- Set reply ----------
+# ---------- تنظیم ریپلی جدید (دو مرحله‌ای شیشه‌ای) ----------
 async def set_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    data = await get_user_data(user_id)
-    if not data or not data['target_chat_id']:
-        await query.edit_message_text("❌ ابتدا چت هدف را تنظیم کنید.")
-        await asyncio.sleep(2)
-        await main_menu(update, context)
+    await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
+    dialogs, error = await get_last_dialogs(query.from_user.id)
+    if error:
+        await query.edit_message_text(f"❌ {error}")
         return ConversationHandler.END
-    buttons = [
-        [InlineKeyboardButton("🔗 با لینک پیام", callback_data="reply_link")],
-        [InlineKeyboardButton("📋 از لیست پیام‌های چت هدف", callback_data="reply_from_chat")],
-        [InlineKeyboardButton("🔙 انصراف", callback_data="back_main")]
-    ]
-    await query.edit_message_text("🔁 **تنظیم ریپلی یکبار مصرف**\n\nلطفاً روش را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
-    return REPLY_METHOD_STATE
+    if not dialogs:
+        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد.")
+        return ConversationHandler.END
+    buttons = []
+    for chat_id, title in dialogs:
+        short_title = title[:40] + "..." if len(title) > 40 else title
+        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"reply_chat_{chat_id}")])
+    buttons.append([InlineKeyboardButton("🔙 انصراف", callback_data="back_main")])
+    await query.edit_message_text("🔁 مرحله 1: چت مورد نظر برای ریپلی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
+    return REPLY_SELECT_CHAT_STATE
 
-async def reply_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reply_select_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -420,16 +425,11 @@ async def reply_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data == "back_main":
         await main_menu(update, context)
         return ConversationHandler.END
-    elif data == "reply_link":
-        await query.edit_message_text("لطفاً لینک پیام مورد نظر را ارسال کنید:\n(مثال: https://t.me/username/123 یا https://t.me/c/123456789/100)\nبرای لغو /cancel")
-        return REPLY_LINK_STATE
-    elif data == "reply_from_chat":
-        user_data = await get_user_data(user_id)
-        if not user_data or not user_data['target_chat_id']:
-            await query.edit_message_text("❌ چت هدف تنظیم نشده.")
-            return ConversationHandler.END
-        chat_id = user_data['target_chat_id']
-        await query.edit_message_text(f"🔄 در حال دریافت آخرین پیام‌های چت `{user_data['target_chat_title'] or chat_id}` ...")
+    elif data.startswith("reply_chat_"):
+        chat_id = int(data.split("_")[2])
+        context.user_data['reply_chat_id'] = chat_id
+        # دریافت ۱۰ پیام آخر این چت
+        await query.edit_message_text(f"🔄 در حال دریافت پیام‌های چت انتخاب‌شده...")
         messages, error = await get_last_messages(user_id, chat_id, limit=10)
         if error:
             await query.edit_message_text(f"❌ {error}")
@@ -437,47 +437,15 @@ async def reply_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not messages:
             await query.edit_message_text("⚠️ هیچ پیامی در این چت یافت نشد.")
             return ConversationHandler.END
-        buttons = [[InlineKeyboardButton(f"📝 {txt}", callback_data=f"reply_msg_{msg_id}")] for msg_id, txt in messages]
+        buttons = []
+        for msg_id, short_text in messages:
+            buttons.append([InlineKeyboardButton(f"📝 {short_text}", callback_data=f"reply_msg_{msg_id}")])
         buttons.append([InlineKeyboardButton("🔙 انصراف", callback_data="back_main")])
-        await query.edit_message_text("لطفاً پیام مورد نظر برای ریپلی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.edit_message_text(f"🔁 مرحله 2: پیام مورد نظر برای ریپلی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
         return REPLY_SELECT_MSG_STATE
     else:
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
-
-async def reply_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    match = re.search(r'https?://t\.me/(?:c/)?(\d+|[a-zA-Z][\w]+)/(\d+)', text)
-    if not match:
-        await update.message.reply_text("❌ لینک معتبر نیست. لطفاً لینک پیام تلگرام را بفرستید.")
-        return REPLY_LINK_STATE
-    chat_part = match.group(1)
-    msg_id = int(match.group(2))
-    data = await get_user_data(user_id)
-    if not data or not data['session_string']:
-        await update.message.reply_text("❌ ابتدا لاگین کنید.")
-        return ConversationHandler.END
-    client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
-    await client.connect()
-    try:
-        if chat_part.isdigit():
-            chat_id = int(f"-100{chat_part}")
-        else:
-            entity = await client.get_entity(chat_part)
-            chat_id = entity.id
-        if chat_id != data['target_chat_id']:
-            await update.message.reply_text(f"❌ لینک مربوط به چت دیگری است. چت هدف شما: `{data['target_chat_title'] or data['target_chat_id']}`\nلطفاً ابتدا چت هدف را تنظیم کنید یا لینک صحیح بفرستید.")
-            return ConversationHandler.END
-        await set_reply(user_id, msg_id, active=True)
-        await update.message.reply_text(f"✅ ریپلی با موفقیت تنظیم شد. پیام بعدی شما به عنوان ریپلی به پیام ID `{msg_id}` ارسال می‌شود (فقط یکبار).")
-        await main_menu(update, context)
-        return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {str(e)}")
-        return ConversationHandler.END
-    finally:
-        await client.disconnect()
 
 async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -489,16 +457,20 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     elif data.startswith("reply_msg_"):
         msg_id = int(data.split("_")[2])
-        await set_reply(user_id, msg_id, active=True)
-        await query.edit_message_text(f"✅ ریپلی با موفقیت تنظیم شد. پیام بعدی شما به عنوان ریپلی به پیام ID `{msg_id}` ارسال می‌شود (فقط یکبار).")
-        await asyncio.sleep(1)
+        chat_id = context.user_data.get('reply_chat_id')
+        if not chat_id:
+            await query.edit_message_text("❌ خطا: چت انتخاب نشده.")
+            return ConversationHandler.END
+        await set_reply(user_id, chat_id, msg_id, active=True)
+        await query.edit_message_text(f"✅ ریپلی با موفقیت تنظیم شد.\nچت: `{chat_id}`\nپیام ID: `{msg_id}`\n\nاکنون یک فایل صوتی یا ویدیویی بفرستید تا به عنوان ریپلی به آن پیام ارسال شود (فقط یکبار).")
+        await asyncio.sleep(2)
         await main_menu(update, context)
         return ConversationHandler.END
     else:
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
-# ---------- Status & logout ----------
+# ---------- وضعیت و خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -516,7 +488,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(user_id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- File handler (with reply and video conversion) ----------
+# ---------- هندلر فایل (با اعمال ریپلی در هر چت) ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -525,9 +497,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data or not data['session_string']:
             await status_msg.edit_text("❌ لاگین نیستید. از منو لاگین کنید.")
             return
-        if not data['target_chat_id']:
-            await status_msg.edit_text("❌ چت هدف تنظیم نشده.")
-            return
+        # اگر ریپلی فعال باشد، چت هدف نادیده گرفته می‌شود و به چت ریپلی ارسال می‌گردد
+        if data['reply_active'] and data['reply_chat_id'] and data['reply_msg_id']:
+            target_chat_id = data['reply_chat_id']
+            reply_to = data['reply_msg_id']
+        else:
+            if not data['target_chat_id']:
+                await status_msg.edit_text("❌ چت هدف تنظیم نشده و ریپلی فعالی هم ندارید.")
+                return
+            target_chat_id = data['target_chat_id']
+            reply_to = None
         msg = update.message
         is_audio = bool(msg.audio or msg.voice)
         is_video = bool(msg.video or msg.video_note)
@@ -563,16 +542,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return
-        target_entity = await get_input_entity_safe(client, data['target_chat_id'])
-        reply_to = data['reply_msg_id'] if data['reply_active'] else None
+        target_entity = await get_input_entity_safe(client, target_chat_id)
         await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو (دایره‌ای)'}...")
         if is_audio:
             await send_as_voice_note(client, target_entity, final_file_path, duration, reply_to=reply_to)
         else:
             await send_as_video_note(client, target_entity, final_file_path, duration, reply_to=reply_to)
         if reply_to:
-            await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت به عنوان ریپلی به پیام {reply_to} ارسال شد.")
-            await clear_reply(user_id)
+            await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت به عنوان ریپلی ارسال شد.")
+            await clear_reply(user_id)  # غیرفعال کردن ریپلی بعد از استفاده
         else:
             await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد.")
         await client.disconnect()
@@ -592,7 +570,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ---------- Web server for Render ----------
+# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -608,7 +586,7 @@ async def run_web():
 async def main():
     await init_db()
     application = Application.builder().token(BOT_TOKEN).build()
-    # Login conversation
+    # لاگین
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -620,7 +598,7 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # Target chat conversation
+    # تنظیم چت هدف
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
@@ -631,12 +609,11 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # Reply conversation
+    # تنظیم ریپلی (دو مرحله‌ای)
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_reply_start, pattern='^set_reply$')],
         states={
-            REPLY_METHOD_STATE: [CallbackQueryHandler(reply_method_choice, pattern='^(reply_link|reply_from_chat|back_main)$')],
-            REPLY_LINK_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reply_link_handler)],
+            REPLY_SELECT_CHAT_STATE: [CallbackQueryHandler(reply_select_chat, pattern='^(reply_chat_|back_main)')],
             REPLY_SELECT_MSG_STATE: [CallbackQueryHandler(reply_select_msg, pattern='^(reply_msg_|back_main)')],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
