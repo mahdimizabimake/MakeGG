@@ -320,7 +320,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل ==========
+# ========== هندلر فایل (اصلاح شده) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -332,7 +332,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data['target_chat_id']:
             await status_msg.edit_text("❌ چت هدف تنظیم نشده.")
             return
-        # تشخیص نوع فایل
+        
         msg = update.message
         is_audio = bool(msg.audio or msg.voice)
         is_video = bool(msg.video or msg.video_note)
@@ -345,25 +345,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duration = getattr(msg.audio or msg.voice, 'duration', 3)
         else:
             duration = getattr(msg.video or msg.video_note, 'duration', 3)
-        if not duration:
+        if not duration or duration <= 0:
             duration = 3
         
         await status_msg.edit_text("📥 در حال دانلود فایل...")
-        file_path = await msg.effective_attachment.get_file().download_to_drive()
+        
+        # اصلاح مهم: دریافت صحیح فایل و دانلود
+        if is_audio:
+            file_obj = await (msg.audio or msg.voice).get_file()
+        else:
+            file_obj = await (msg.video or msg.video_note).get_file()
+        
+        file_path = await file_obj.download_to_drive()
         
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         target = await client.get_entity(data['target_chat_id'])
+        
         await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو'}...")
         if is_audio:
             await send_as_voice_note(client, target, file_path, duration)
         else:
             await send_as_video_note(client, target, file_path, duration)
+        
         await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد (مدت {duration} ثانیه)")
         await client.disconnect()
         os.remove(file_path)
+        
     except FloodWaitError as e:
-        await status_msg.edit_text(f"⏳ محدودیت: {e.seconds} ثانیه صبر کنید")
+        await status_msg.edit_text(f"⏳ محدودیت تلگرام: {e.seconds} ثانیه صبر کنید")
     except Exception as e:
         await status_msg.edit_text(f"❌ خطا: {str(e)}")
 
