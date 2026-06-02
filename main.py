@@ -79,7 +79,24 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-# ========== توابع Telethon ==========
+# ========== توابع Telethon با مدیریت خطای Entity ==========
+# تابع کمکی برای گرفتن reliable InputEntity
+async def get_input_entity_safe(client, identifier):
+    try:
+        return await client.get_input_entity(identifier)
+    except ValueError:
+        # Warm up cache
+        await client.get_dialogs()
+        return await client.get_input_entity(identifier)
+
+# تابع کمکی برای گرفتن Full Entity
+async def get_entity_safe(client, identifier):
+    try:
+        return await client.get_entity(identifier)
+    except ValueError:
+        await client.get_dialogs()
+        return await client.get_entity(identifier)
+
 async def send_action_with_duration(client, chat, action_type, duration_sec):
     try:
         action = SendMessageRecordAudioAction() if action_type == 'voice' else SendMessageRecordVideoAction()
@@ -285,10 +302,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
-        if chat_input.lstrip('-').isdigit():
-            entity = await client.get_entity(int(chat_input))
-        else:
-            entity = await client.get_entity(chat_input)
+        entity = await get_entity_safe(client, chat_input)
         chat_id = entity.id
         chat_title = getattr(entity, 'title', None) or entity.first_name or str(entity.id)
         await update_target_chat(user_id, chat_id, chat_title)
@@ -320,7 +334,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل (اصلاح شده) ==========
+# ========== هندلر فایل (با مدیریت خطای Entity) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -350,7 +364,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_msg.edit_text("📥 در حال دانلود فایل...")
         
-        # اصلاح مهم: دریافت صحیح فایل و دانلود
         if is_audio:
             file_obj = await (msg.audio or msg.voice).get_file()
         else:
@@ -360,13 +373,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
-        target = await client.get_entity(data['target_chat_id'])
+        
+        # استفاده از تابع safe برای گرفتن InputEntity
+        target_input_entity = await get_input_entity_safe(client, data['target_chat_id'])
         
         await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو'}...")
         if is_audio:
-            await send_as_voice_note(client, target, file_path, duration)
+            await send_as_voice_note(client, target_input_entity, file_path, duration)
         else:
-            await send_as_video_note(client, target, file_path, duration)
+            await send_as_video_note(client, target_input_entity, file_path, duration)
         
         await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد (مدت {duration} ثانیه)")
         await client.disconnect()
