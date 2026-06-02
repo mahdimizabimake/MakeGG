@@ -79,23 +79,28 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-# ========== توابع Telethon با مدیریت خطای Entity ==========
-# تابع کمکی برای گرفتن reliable InputEntity
+# ========== توابع Telethon با مدیریت خطای Entity و احیای session ==========
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
     except ValueError:
-        # Warm up cache
         await client.get_dialogs()
         return await client.get_input_entity(identifier)
 
-# تابع کمکی برای گرفتن Full Entity
 async def get_entity_safe(client, identifier):
     try:
         return await client.get_entity(identifier)
     except ValueError:
         await client.get_dialogs()
         return await client.get_entity(identifier)
+
+async def ensure_session_active(client):
+    """بررسی اینکه session زنده است با یک درخواست ساده"""
+    try:
+        await client.get_me()
+        return True
+    except:
+        return False
 
 async def send_action_with_duration(client, chat, action_type, duration_sec):
     try:
@@ -116,9 +121,10 @@ async def send_as_voice_note(client, chat, file_path, duration):
 
 async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
-    await client.send_file(chat, file_path, video_note=True)
+    # ارسال به عنوان ویدیو نوت (دایره‌ای) با force_document=False
+    await client.send_file(chat, file_path, video_note=True, force_document=False)
 
-# ========== گرفتن ۱۰ چت آخر ==========
+# ========== گرفتن ۱۰ چت آخر با احیای session ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -126,6 +132,10 @@ async def get_last_dialogs(user_id):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
+        # اطمینان از فعال بودن session
+        if not await ensure_session_active(client):
+            print("Session not active, cannot get dialogs")
+            return None
         dialogs = await client.get_dialogs(limit=10)
         result = []
         for d in dialogs:
@@ -253,7 +263,7 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ ابتدا لاگین کنید.")
         return ConversationHandler.END
     if not dialogs:
-        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد. دوباره لاگین کنید.")
+        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد. لطفاً مجدداً لاگین کنید.")
         return ConversationHandler.END
     buttons = []
     for chat_id, title in dialogs:
@@ -334,7 +344,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل (با مدیریت خطای Entity) ==========
+# ========== هندلر فایل (با اصلاح video note) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -374,7 +384,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         
-        # استفاده از تابع safe برای گرفتن InputEntity
+        if not await ensure_session_active(client):
+            await status_msg.edit_text("❌ نشست شما منقضی شده است. لطفاً مجدداً لاگین کنید.")
+            await client.disconnect()
+            return
+        
         target_input_entity = await get_input_entity_safe(client, data['target_chat_id'])
         
         await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو'}...")
