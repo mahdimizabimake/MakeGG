@@ -95,7 +95,6 @@ async def get_entity_safe(client, identifier):
         return await client.get_entity(identifier)
 
 async def ensure_session_active(client):
-    """بررسی اینکه session زنده است با یک درخواست ساده"""
     try:
         await client.get_me()
         return True
@@ -121,7 +120,7 @@ async def send_as_voice_note(client, chat, file_path, duration):
 
 async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
-    # ارسال به عنوان ویدیو نوت (دایره‌ای) با force_document=False
+    # ارسال به عنوان ویدیو نوت (دایره‌ای)
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
 # ========== گرفتن ۱۰ چت آخر با احیای session ==========
@@ -132,9 +131,7 @@ async def get_last_dialogs(user_id):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
-        # اطمینان از فعال بودن session
         if not await ensure_session_active(client):
-            print("Session not active, cannot get dialogs")
             return None
         dialogs = await client.get_dialogs(limit=10)
         result = []
