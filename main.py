@@ -77,22 +77,26 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
+# ========== تبدیل ویدیو با برش (crop) به جای حاشیه ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
+    """تبدیل ویدیو به مربع با برش از مرکز، بدون حاشیه سیاه"""
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
     except:
         raise Exception("ffmpeg not found")
+    # برش بزرگترین مربع ممکن از مرکز + مقیاس به target_size
     cmd = [
         'ffmpeg', '-i', input_path,
-        '-vf', f'scale=iw*min({target_size}/iw\\,{target_size}/ih):ih*min({target_size}/iw\\,{target_size}/ih),pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2',
+        '-vf', f'crop=min(iw\\,ih):min(iw\\,ih),scale={target_size}:{target_size}',
         '-c:a', 'copy', '-y', output_path
     ]
     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     _, stderr = await process.communicate()
     if process.returncode != 0:
-        raise Exception(f"ffmpeg error: {stderr.decode()}")
+        raise Exception(f"ffmpeg crop/scale error: {stderr.decode()}")
     return output_path
 
+# ========== توابع Telethon ==========
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
@@ -129,6 +133,7 @@ async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
+# ========== گرفتن ۱۰ چت آخر ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -148,6 +153,7 @@ async def get_last_dialogs(user_id):
     finally:
         await client.disconnect()
 
+# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
@@ -252,7 +258,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف (با callback_data کوتاه) ----------
+# ---------- تنظیم چت هدف ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -279,7 +285,6 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for chat_id, title in dialogs:
         short_title = title[:40] + "..." if len(title) > 40 else title
-        # فقط chat_id در callback_data (بدون عنوان)
         buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"chat_{chat_id}")])
     buttons.append([InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")])
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")])
@@ -303,7 +308,6 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("chat_"):
         try:
             chat_id = int(data.split("_")[1])
-            # دریافت عنوان چت با استفاده از نشست کاربر
             user_data = await get_user_data(user_id)
             if not user_data or not user_data['session_string']:
                 await query.edit_message_text("❌ نشست معتبر نیست. لطفاً لاگین کنید.")
@@ -315,7 +319,6 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
                 chat_title = entity.title or entity.first_name or str(chat_id)
             except Exception as e:
                 chat_title = str(chat_id)
-                print(f"Error getting title: {e}")
             finally:
                 await client.disconnect()
             await update_target_chat(user_id, chat_id, chat_title)
@@ -353,6 +356,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
+# ---------- وضعیت و خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -373,7 +377,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- هندلر فایل ----------
+# ========== هندلر فایل ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -406,7 +410,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = str(await file_obj.download_to_drive())
         final_file_path = file_path
         if is_video:
-            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع...")
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
             square_path = file_path + "_square.mp4"
             try:
                 await convert_to_square_ffmpeg(file_path, square_path)
@@ -444,6 +448,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
+# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
