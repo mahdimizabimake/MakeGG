@@ -16,6 +16,8 @@ from telethon.tl.types import (
 )
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
+from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip
+import math
 
 # ========== متغیرهای محیطی ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -79,7 +81,34 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-# ========== توابع Telethon با مدیریت خطای Entity و احیای session ==========
+# ========== تبدیل ویدیو به مربع ==========
+async def convert_to_square(input_path, output_path, target_size=480):
+    """تبدیل ویدیو به مربع با ابعاد target_size (پیش‌فرض 480) بدون برش محتوا - اضافه کردن حاشیه"""
+    def _convert():
+        clip = VideoFileClip(input_path)
+        # محدودیت مدت زمان (اختیاری)
+        if clip.duration > 60:
+            clip = clip.subclip(0, 60)
+        w, h = clip.size
+        # محاسبه نسبت
+        if w > h:
+            new_w = target_size
+            new_h = int((target_size * h) / w)
+        else:
+            new_h = target_size
+            new_w = int((target_size * w) / h)
+        resized = clip.resize((new_w, new_h))
+        # ساخت پس‌زمینه مربع سیاه
+        background = ColorClip(size=(target_size, target_size), color=(0, 0, 0), duration=clip.duration)
+        # قرار دادن ویدیو در مرکز
+        final = CompositeVideoClip([background, resized.set_position(('center', 'center'))])
+        # ذخیره با کدک مناسب
+        final.write_videofile(output_path, codec='libx264', audio_codec='aac', fps=30, preset='medium')
+        clip.close()
+    await asyncio.to_thread(_convert)
+    return output_path
+
+# ========== توابع Telethon ==========
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
@@ -87,18 +116,12 @@ async def get_input_entity_safe(client, identifier):
         await client.get_dialogs()
         return await client.get_input_entity(identifier)
 
-async def get_entity_safe(client, identifier):
-    try:
-        return await client.get_entity(identifier)
-    except ValueError:
-        await client.get_dialogs()
-        return await client.get_entity(identifier)
-
 async def ensure_session_active(client):
     try:
         await client.get_me()
         return True
-    except:
+    except Exception as e:
+        print(f"Session check failed: {e}")
         return False
 
 async def send_action_with_duration(client, chat, action_type, duration_sec):
@@ -120,28 +143,27 @@ async def send_as_voice_note(client, chat, file_path, duration):
 
 async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
-    # ارسال به عنوان ویدیو نوت (دایره‌ای)
+    # ارسال به عنوان ویدیو نوت (دایره‌ای) - ویدیو قبلاً به مربع تبدیل شده
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
-# ========== گرفتن ۱۰ چت آخر با احیای session ==========
+# ========== گرفتن ۱۰ چت آخر ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        return None
+        return None, "لاگین نشده‌اید"
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
         if not await ensure_session_active(client):
-            return None
+            return None, "نشست منقضی شده، لطفاً دوباره لاگین کنید"
         dialogs = await client.get_dialogs(limit=10)
         result = []
         for d in dialogs:
             title = d.title or d.name or (d.entity.first_name if d.entity else str(d.id))
             result.append((d.id, title))
-        return result
+        return result, None
     except Exception as e:
-        print(f"Error getting dialogs: {e}")
-        return []
+        return None, f"خطا در دریافت دیالوگ‌ها: {str(e)}"
     finally:
         await client.disconnect()
 
@@ -166,7 +188,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- مکالمه لاگین ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -255,12 +277,12 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
-    dialogs = await get_last_dialogs(query.from_user.id)
-    if dialogs is None:
-        await query.edit_message_text("❌ ابتدا لاگین کنید.")
+    dialogs, error = await get_last_dialogs(query.from_user.id)
+    if error:
+        await query.edit_message_text(f"❌ {error}")
         return ConversationHandler.END
     if not dialogs:
-        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد. لطفاً مجدداً لاگین کنید.")
+        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد.")
         return ConversationHandler.END
     buttons = []
     for chat_id, title in dialogs:
@@ -309,7 +331,10 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
-        entity = await get_entity_safe(client, chat_input)
+        if chat_input.lstrip('-').isdigit():
+            entity = await client.get_entity(int(chat_input))
+        else:
+            entity = await client.get_entity(chat_input)
         chat_id = entity.id
         chat_title = getattr(entity, 'title', None) or entity.first_name or str(entity.id)
         await update_target_chat(user_id, chat_id, chat_title)
@@ -341,7 +366,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل (با اصلاح video note) ==========
+# ========== هندلر فایل (با تبدیل خودکار ویدیو به مربع) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -353,14 +378,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data['target_chat_id']:
             await status_msg.edit_text("❌ چت هدف تنظیم نشده.")
             return
-        
         msg = update.message
         is_audio = bool(msg.audio or msg.voice)
         is_video = bool(msg.video or msg.video_note)
         if not is_audio and not is_video:
             await status_msg.edit_text("❌ فقط فایل صوتی یا ویدیویی پشتیبانی می‌شود.")
             return
-        
         duration = 3
         if is_audio:
             duration = getattr(msg.audio or msg.voice, 'duration', 3)
@@ -368,36 +391,42 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duration = getattr(msg.video or msg.video_note, 'duration', 3)
         if not duration or duration <= 0:
             duration = 3
-        
         await status_msg.edit_text("📥 در حال دانلود فایل...")
-        
         if is_audio:
             file_obj = await (msg.audio or msg.voice).get_file()
         else:
             file_obj = await (msg.video or msg.video_note).get_file()
-        
         file_path = await file_obj.download_to_drive()
-        
+        # اگر ویدیو باشد، تبدیل به مربع
+        final_file_path = file_path
+        if is_video:
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (این عملیات چند ثانیه طول می‌کشد)...")
+            square_path = file_path + "_square.mp4"
+            try:
+                await convert_to_square(file_path, square_path)
+                final_file_path = square_path
+            except Exception as e:
+                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {e}. ارسال ویدیوی اصلی...")
+                final_file_path = file_path
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
-        
         if not await ensure_session_active(client):
-            await status_msg.edit_text("❌ نشست شما منقضی شده است. لطفاً مجدداً لاگین کنید.")
+            await status_msg.edit_text("❌ نشست شما منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return
-        
         target_input_entity = await get_input_entity_safe(client, data['target_chat_id'])
-        
-        await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو'}...")
+        await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو (دایره‌ای)'}...")
         if is_audio:
-            await send_as_voice_note(client, target_input_entity, file_path, duration)
+            await send_as_voice_note(client, target_input_entity, final_file_path, duration)
         else:
-            await send_as_video_note(client, target_input_entity, file_path, duration)
-        
-        await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد (مدت {duration} ثانیه)")
+            await send_as_video_note(client, target_input_entity, final_file_path, duration)
+        await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد")
         await client.disconnect()
-        os.remove(file_path)
-        
+        # پاک کردن فایل‌های موقت
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if is_video and os.path.exists(final_file_path) and final_file_path != file_path:
+            os.remove(final_file_path)
     except FloodWaitError as e:
         await status_msg.edit_text(f"⏳ محدودیت تلگرام: {e.seconds} ثانیه صبر کنید")
     except Exception as e:
