@@ -79,32 +79,21 @@ async def update_target_chat(user_id, chat_id, chat_title):
 
 # ========== تبدیل ویدیو به مربع با ffmpeg ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
-    """تبدیل ویدیو به مربع 480x480 با padding سیاه. کدک H.264 را حفظ می‌کند."""
-    # بررسی وجود ffmpeg
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
     except:
         raise Exception("ffmpeg در سیستم موجود نیست")
-    
-    # دستور ffmpeg: مقیاس‌گذاری متناسب، سپس padding به مرکز
-    # -vf "scale=iw*min(480/iw\,480/ih):ih*min(480/iw\,480/ih), pad=480:480:(480-iw)/2:(480-ih)/2"
-    # برای حفظ نسبت و اضافه کردن حاشیه سیاه
     cmd = [
         'ffmpeg', '-i', input_path,
         '-vf', f'scale=iw*min({target_size}/iw\\,{target_size}/ih):ih*min({target_size}/iw\\,{target_size}/ih),pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2',
-        '-c:a', 'copy',   # کپی صدا بدون تغییر
-        '-y',            # بازنویسی خروجی
-        output_path
+        '-c:a', 'copy', '-y', output_path
     ]
-    # محدودیت مدت زمان به 60 ثانیه (اختیاری)
-    # می‌توان -t 60 اضافه کرد
     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
         raise Exception(f"ffmpeg error: {stderr.decode()}")
     return output_path
 
-# ========== توابع Telethon ==========
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
@@ -141,7 +130,7 @@ async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
-# ========== گرفتن ۱۰ چت آخر ==========
+# ========== دریافت دیالوگ‌ها با مدیریت خطا ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -149,8 +138,11 @@ async def get_last_dialogs(user_id):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
-        if not await ensure_session_active(client):
-            return None, "نشست منقضی شده"
+        # بررسی صحت نشست
+        try:
+            await client.get_me()
+        except Exception as e:
+            return None, f"نشست معتبر نیست: {str(e)}"
         dialogs = await client.get_dialogs(limit=10)
         result = []
         for d in dialogs:
@@ -158,7 +150,7 @@ async def get_last_dialogs(user_id):
             result.append((d.id, title))
         return result, None
     except Exception as e:
-        return None, f"خطا: {str(e)}"
+        return None, f"خطا در دریافت دیالوگ‌ها: {str(e)}"
     finally:
         await client.disconnect()
 
@@ -267,18 +259,33 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف ----------
+# ---------- تنظیم چت هدف با نمایش خطا ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
     dialogs, error = await get_last_dialogs(query.from_user.id)
     if error:
-        await query.edit_message_text(f"❌ {error}")
-        return ConversationHandler.END
+        await query.edit_message_text(
+            f"❌ {error}\n\n"
+            "نمی‌توان لیست چت‌ها را دریافت کرد. لطفاً از گزینه «ورود دستی» استفاده کنید.\n"
+            "برای بازگشت به منو، دکمه زیر را بزنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")],
+                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]
+            ])
+        )
+        return TARGET_CHAT_STATE
     if not dialogs:
-        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد.")
-        return ConversationHandler.END
+        await query.edit_message_text(
+            "⚠️ هیچ چتی پیدا نشد. ممکن است هنوز چتی ندارید یا نشست شما معتبر نیست.\n"
+            "لطفاً از گزینه ورود دستی استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")],
+                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]
+            ])
+        )
+        return TARGET_CHAT_STATE
     buttons = []
     for chat_id, title in dialogs:
         short_title = title[:30] + "..." if len(title) > 30 else title
@@ -361,7 +368,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل (با استفاده از ffmpeg برای تبدیل ویدیو) ==========
+# ========== هندلر فایل ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -391,7 +398,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_obj = await (msg.audio or msg.voice).get_file()
         else:
             file_obj = await (msg.video or msg.video_note).get_file()
-        # اطمینان از str بودن مسیر
         file_path = str(await file_obj.download_to_drive())
         final_file_path = file_path
         if is_video:
@@ -417,7 +423,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_as_video_note(client, target_entity, final_file_path, duration)
         await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد")
         await client.disconnect()
-        # پاک کردن فایل‌های موقت
         if os.path.exists(file_path):
             os.remove(file_path)
         if is_video and os.path.exists(final_file_path) and final_file_path != file_path:
@@ -450,7 +455,6 @@ async def run_web():
 async def main():
     await init_db()
     app = Application.builder().token(BOT_TOKEN).build()
-    # مکالمه لاگین
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -462,7 +466,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم چت هدف
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
