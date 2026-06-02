@@ -77,19 +77,18 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-# ========== تبدیل ویدیو به مربع با ffmpeg ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
     except:
-        raise Exception("ffmpeg در سیستم موجود نیست")
+        raise Exception("ffmpeg not found")
     cmd = [
         'ffmpeg', '-i', input_path,
         '-vf', f'scale=iw*min({target_size}/iw\\,{target_size}/ih):ih*min({target_size}/iw\\,{target_size}/ih),pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2',
         '-c:a', 'copy', '-y', output_path
     ]
     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = await process.communicate()
+    _, stderr = await process.communicate()
     if process.returncode != 0:
         raise Exception(f"ffmpeg error: {stderr.decode()}")
     return output_path
@@ -130,7 +129,6 @@ async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
-# ========== دریافت دیالوگ‌ها با مدیریت خطا ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -138,11 +136,7 @@ async def get_last_dialogs(user_id):
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
-        # بررسی صحت نشست
-        try:
-            await client.get_me()
-        except Exception as e:
-            return None, f"نشست معتبر نیست: {str(e)}"
+        await client.get_me()
         dialogs = await client.get_dialogs(limit=10)
         result = []
         for d in dialogs:
@@ -150,11 +144,10 @@ async def get_last_dialogs(user_id):
             result.append((d.id, title))
         return result, None
     except Exception as e:
-        return None, f"خطا در دریافت دیالوگ‌ها: {str(e)}"
+        return None, f"خطا: {str(e)}"
     finally:
         await client.disconnect()
 
-# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
@@ -259,7 +252,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف با نمایش خطا ----------
+# ---------- تنظیم چت هدف (با callback_data کوتاه) ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -267,9 +260,7 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dialogs, error = await get_last_dialogs(query.from_user.id)
     if error:
         await query.edit_message_text(
-            f"❌ {error}\n\n"
-            "نمی‌توان لیست چت‌ها را دریافت کرد. لطفاً از گزینه «ورود دستی» استفاده کنید.\n"
-            "برای بازگشت به منو، دکمه زیر را بزنید.",
+            f"❌ {error}\n\nلطفاً از گزینه «ورود دستی» استفاده کنید.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")],
                 [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]
@@ -278,8 +269,7 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return TARGET_CHAT_STATE
     if not dialogs:
         await query.edit_message_text(
-            "⚠️ هیچ چتی پیدا نشد. ممکن است هنوز چتی ندارید یا نشست شما معتبر نیست.\n"
-            "لطفاً از گزینه ورود دستی استفاده کنید.",
+            "⚠️ هیچ چتی پیدا نشد.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")],
                 [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]
@@ -288,11 +278,15 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return TARGET_CHAT_STATE
     buttons = []
     for chat_id, title in dialogs:
-        short_title = title[:30] + "..." if len(title) > 30 else title
-        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"select_chat|{chat_id}|{title[:50]}")])
+        short_title = title[:40] + "..." if len(title) > 40 else title
+        # فقط chat_id در callback_data (بدون عنوان)
+        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"chat_{chat_id}")])
     buttons.append([InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")])
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")])
-    await query.edit_message_text("🎯 انتخاب چت هدف:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+    await query.edit_message_text(
+        "🎯 انتخاب چت هدف:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
     return TARGET_CHAT_STATE
 
 async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -306,20 +300,32 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "back_main":
         await main_menu(update, context)
         return ConversationHandler.END
-    elif data.startswith("select_chat|"):
-        parts = data.split("|")
-        if len(parts) >= 2:
+    elif data.startswith("chat_"):
+        try:
+            chat_id = int(data.split("_")[1])
+            # دریافت عنوان چت با استفاده از نشست کاربر
+            user_data = await get_user_data(user_id)
+            if not user_data or not user_data['session_string']:
+                await query.edit_message_text("❌ نشست معتبر نیست. لطفاً لاگین کنید.")
+                return ConversationHandler.END
+            client = TelegramClient(StringSession(user_data['session_string']), user_data['api_id'], user_data['api_hash'])
+            await client.connect()
             try:
-                chat_id = int(parts[1])
-                chat_title = parts[2] if len(parts) > 2 else str(chat_id)
-                await update_target_chat(user_id, chat_id, chat_title)
-                await query.edit_message_text(f"✅ چت هدف تنظیم شد: `{chat_title}`")
-                await asyncio.sleep(1)
-                await main_menu(update, context)
-                return ConversationHandler.END
-            except ValueError:
-                await query.edit_message_text("❌ خطا در شناسایی چت.")
-                return ConversationHandler.END
+                entity = await client.get_entity(chat_id)
+                chat_title = entity.title or entity.first_name or str(chat_id)
+            except Exception as e:
+                chat_title = str(chat_id)
+                print(f"Error getting title: {e}")
+            finally:
+                await client.disconnect()
+            await update_target_chat(user_id, chat_id, chat_title)
+            await query.edit_message_text(f"✅ چت هدف تنظیم شد: `{chat_title}`")
+            await asyncio.sleep(1)
+            await main_menu(update, context)
+            return ConversationHandler.END
+        except Exception as e:
+            await query.edit_message_text(f"❌ خطا: {str(e)}")
+            return ConversationHandler.END
     await query.edit_message_text("❌ دستور نامعتبر.")
     return ConversationHandler.END
 
@@ -347,7 +353,6 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- وضعیت و خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -368,7 +373,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل ==========
+# ---------- هندلر فایل ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -401,7 +406,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = str(await file_obj.download_to_drive())
         final_file_path = file_path
         if is_video:
-            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (با ffmpeg)...")
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع...")
             square_path = file_path + "_square.mp4"
             try:
                 await convert_to_square_ffmpeg(file_path, square_path)
@@ -412,7 +417,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         if not await ensure_session_active(client):
-            await status_msg.edit_text("❌ نشست شما منقضی شده. لطفاً دوباره لاگین کنید.")
+            await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return
         target_entity = await get_input_entity_safe(client, data['target_chat_id'])
@@ -439,7 +444,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -470,7 +474,7 @@ async def main():
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
             TARGET_CHAT_STATE: [
-                CallbackQueryHandler(set_target_chat_button, pattern='^(select_chat\\||manual_input|back_main)'),
+                CallbackQueryHandler(set_target_chat_button, pattern='^(chat_|manual_input|back_main)'),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, set_target_manual)
             ]
         },
