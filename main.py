@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import psycopg
 from psycopg.rows import dict_row
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,19 +17,14 @@ from telethon.tl.types import (
 )
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip
-import math
 
-# ========== متغیرهای محیطی ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if not BOT_TOKEN or not DATABASE_URL:
-    raise Exception("لطفاً BOT_TOKEN و DATABASE_URL را تنظیم کنید.")
+    raise Exception("BOT_TOKEN and DATABASE_URL required")
 
-# ========== مراحل مکالمه ==========
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 
-# ========== اتصال به PostgreSQL ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -81,31 +77,31 @@ async def update_target_chat(user_id, chat_id, chat_title):
             await cur.execute('UPDATE user_data SET target_chat_id = %s, target_chat_title = %s WHERE user_id = %s', (chat_id, chat_title, user_id))
             await conn.commit()
 
-# ========== تبدیل ویدیو به مربع ==========
-async def convert_to_square(input_path, output_path, target_size=480):
-    """تبدیل ویدیو به مربع با ابعاد target_size (پیش‌فرض 480) بدون برش محتوا - اضافه کردن حاشیه"""
-    def _convert():
-        clip = VideoFileClip(input_path)
-        # محدودیت مدت زمان (اختیاری)
-        if clip.duration > 60:
-            clip = clip.subclip(0, 60)
-        w, h = clip.size
-        # محاسبه نسبت
-        if w > h:
-            new_w = target_size
-            new_h = int((target_size * h) / w)
-        else:
-            new_h = target_size
-            new_w = int((target_size * w) / h)
-        resized = clip.resize((new_w, new_h))
-        # ساخت پس‌زمینه مربع سیاه
-        background = ColorClip(size=(target_size, target_size), color=(0, 0, 0), duration=clip.duration)
-        # قرار دادن ویدیو در مرکز
-        final = CompositeVideoClip([background, resized.set_position(('center', 'center'))])
-        # ذخیره با کدک مناسب
-        final.write_videofile(output_path, codec='libx264', audio_codec='aac', fps=30, preset='medium')
-        clip.close()
-    await asyncio.to_thread(_convert)
+# ========== تبدیل ویدیو به مربع با ffmpeg ==========
+async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
+    """تبدیل ویدیو به مربع 480x480 با padding سیاه. کدک H.264 را حفظ می‌کند."""
+    # بررسی وجود ffmpeg
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    except:
+        raise Exception("ffmpeg در سیستم موجود نیست")
+    
+    # دستور ffmpeg: مقیاس‌گذاری متناسب، سپس padding به مرکز
+    # -vf "scale=iw*min(480/iw\,480/ih):ih*min(480/iw\,480/ih), pad=480:480:(480-iw)/2:(480-ih)/2"
+    # برای حفظ نسبت و اضافه کردن حاشیه سیاه
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-vf', f'scale=iw*min({target_size}/iw\\,{target_size}/ih):ih*min({target_size}/iw\\,{target_size}/ih),pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2',
+        '-c:a', 'copy',   # کپی صدا بدون تغییر
+        '-y',            # بازنویسی خروجی
+        output_path
+    ]
+    # محدودیت مدت زمان به 60 ثانیه (اختیاری)
+    # می‌توان -t 60 اضافه کرد
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise Exception(f"ffmpeg error: {stderr.decode()}")
     return output_path
 
 # ========== توابع Telethon ==========
@@ -143,7 +139,6 @@ async def send_as_voice_note(client, chat, file_path, duration):
 
 async def send_as_video_note(client, chat, file_path, duration):
     await send_action_with_duration(client, chat, 'video', duration)
-    # ارسال به عنوان ویدیو نوت (دایره‌ای) - ویدیو قبلاً به مربع تبدیل شده
     await client.send_file(chat, file_path, video_note=True, force_document=False)
 
 # ========== گرفتن ۱۰ چت آخر ==========
@@ -155,7 +150,7 @@ async def get_last_dialogs(user_id):
     await client.connect()
     try:
         if not await ensure_session_active(client):
-            return None, "نشست منقضی شده، لطفاً دوباره لاگین کنید"
+            return None, "نشست منقضی شده"
         dialogs = await client.get_dialogs(limit=10)
         result = []
         for d in dialogs:
@@ -163,7 +158,7 @@ async def get_last_dialogs(user_id):
             result.append((d.id, title))
         return result, None
     except Exception as e:
-        return None, f"خطا در دریافت دیالوگ‌ها: {str(e)}"
+        return None, f"خطا: {str(e)}"
     finally:
         await client.disconnect()
 
@@ -366,7 +361,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(query.from_user.id, session_string="")
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== هندلر فایل (با تبدیل خودکار ویدیو به مربع) ==========
+# ========== هندلر فایل (با استفاده از ffmpeg برای تبدیل ویدیو) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -396,17 +391,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_obj = await (msg.audio or msg.voice).get_file()
         else:
             file_obj = await (msg.video or msg.video_note).get_file()
-        file_path = await file_obj.download_to_drive()
-        # اگر ویدیو باشد، تبدیل به مربع
+        # اطمینان از str بودن مسیر
+        file_path = str(await file_obj.download_to_drive())
         final_file_path = file_path
         if is_video:
-            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (این عملیات چند ثانیه طول می‌کشد)...")
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (با ffmpeg)...")
             square_path = file_path + "_square.mp4"
             try:
-                await convert_to_square(file_path, square_path)
+                await convert_to_square_ffmpeg(file_path, square_path)
                 final_file_path = square_path
             except Exception as e:
-                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {e}. ارسال ویدیوی اصلی...")
+                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
                 final_file_path = file_path
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
@@ -414,12 +409,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ نشست شما منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return
-        target_input_entity = await get_input_entity_safe(client, data['target_chat_id'])
+        target_entity = await get_input_entity_safe(client, data['target_chat_id'])
         await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو (دایره‌ای)'}...")
         if is_audio:
-            await send_as_voice_note(client, target_input_entity, final_file_path, duration)
+            await send_as_voice_note(client, target_entity, final_file_path, duration)
         else:
-            await send_as_video_note(client, target_input_entity, final_file_path, duration)
+            await send_as_video_note(client, target_entity, final_file_path, duration)
         await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد")
         await client.disconnect()
         # پاک کردن فایل‌های موقت
