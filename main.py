@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sqlite3
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -108,7 +109,6 @@ async def send_as_video_note(client, chat, file_path, duration):
 
 # ========== گرفتن ۱۰ چت آخر کاربر ==========
 async def get_last_dialogs(user_id):
-    """برگشت لیستی از (chat_id, title) برای ۱۰ دیالوگ آخر کاربر"""
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
         return None
@@ -154,7 +154,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -246,16 +246,14 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف با لیست دکمه‌ای ----------
+# ---------- تنظیم چت هدف با لیست دکمه‌ای (اصلاح شده) ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
 
-    # ارسال پیام "در حال بارگیری..."
     await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
 
-    # گرفتن ۱۰ دیالوگ آخر
     dialogs = await get_last_dialogs(user_id)
     if dialogs is None:
         await query.edit_message_text("❌ ابتدا لاگین کنید.")
@@ -264,13 +262,12 @@ async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ هیچ چتی پیدا نشد. شاید نشست شما منقضی شده است. لطفاً مجدداً لاگین کنید.")
         return ConversationHandler.END
 
-    # ساخت دکمه‌ها
     buttons = []
     for chat_id, title in dialogs:
-        # محدود کردن طول عنوان به ۳۰ کاراکتر
         short_title = title[:30] + "..." if len(title) > 30 else title
-        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"select_chat_{chat_id}_{title[:50]}")])
-    # دکمه ورود دستی
+        # استفاده از جداکننده | برای جلوگیری از تداخل با کاراکتر _
+        callback_data = f"select_chat|{chat_id}|{title[:50]}"
+        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=callback_data)])
     buttons.append([InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")])
     buttons.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")])
 
@@ -293,38 +290,31 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
             "لطفاً **یوزرنیم** (مثل @username) یا **آیدی عددی** چت مورد نظر را وارد کنید.\n"
             "برای لغو: /cancel"
         )
-        return TARGET_CHAT_STATE  # منتظر پیام متنی
+        return TARGET_CHAT_STATE
     elif data == "back_main":
-        # برگشت به منوی اصلی
         await main_menu(update, context)
         return ConversationHandler.END
-    elif data.startswith("select_chat_"):
-        # فرمت: select_chat_123456789_SomeTitle
-        parts = data.split("_", 2)
-        if len(parts) >= 2:
-            try:
-                chat_id = int(parts[1])
-                chat_title = parts[2] if len(parts) > 2 else str(chat_id)
-            except ValueError:
-                await query.edit_message_text("خطا در شناسایی چت.")
-                return ConversationHandler.END
-        else:
-            await query.edit_message_text("خطا در شناسایی چت.")
+    elif data.startswith("select_chat|"):
+        parts = data.split("|", 2)
+        if len(parts) < 2:
+            await query.edit_message_text("❌ خطا در شناسایی چت (فرمت داده نامعتبر).")
             return ConversationHandler.END
-
-        # ذخیره چت هدف
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("❌ خطا در شناسایی چت: آیدی عددی معتبر نیست.")
+            return ConversationHandler.END
+        chat_title = parts[2] if len(parts) > 2 else str(chat_id)
+        
         await update_target_chat(user_id, chat_id, chat_title)
         await query.edit_message_text(f"✅ چت هدف تنظیم شد: `{chat_title}` (ID: `{chat_id}`)")
-        # نمایش منوی اصلی بعد از 2 ثانیه
         await asyncio.sleep(2)
         await main_menu(update, context)
         return ConversationHandler.END
 
-    # اگر هیچکدام نبود
-    await query.edit_message_text("دستور نامعتبر.")
+    await query.edit_message_text("❌ دستور نامعتبر.")
     return ConversationHandler.END
 
-# هندلر ورود دستی (متن)
 async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_input = update.message.text.strip()
@@ -450,12 +440,12 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(login_conv)
-    # مکالمه تنظیم چت هدف (با دکمه و ورود دستی)
+    # مکالمه تنظیم چت هدف
     target_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
             TARGET_CHAT_STATE: [
-                CallbackQueryHandler(set_target_chat_button, pattern='^(select_chat_|manual_input|back_main)'),
+                CallbackQueryHandler(set_target_chat_button, pattern='^(select_chat\\||manual_input|back_main)'),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, set_target_manual)
             ]
         },
