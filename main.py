@@ -141,9 +141,12 @@ async def get_video_duration(video_path):
     """گرفتن مدت زمان ویدیو با ffprobe بدون خطای unpack"""
     cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
+        print(f"ffprobe error: {stderr.decode()}")
         return 30
     try:
         return float(stdout.decode().strip())
@@ -186,35 +189,39 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع (با asyncio.subprocess) ==========
+# ========== تبدیل ویدیو به مربع با استفاده از asyncio.create_subprocess_exec ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
-        # بررسی وجود ffmpeg
-        proc = await asyncio.create_subprocess_exec(FFMPEG_PATH, '-version', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(
+            FFMPEG_PATH, '-version',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
         await proc.wait()
-    except:
-        raise Exception("ffmpeg not found")
-    
-    # استفاده از مسیرهای مطلق
+    except Exception as e:
+        raise Exception(f"ffmpeg not found or not executable: {e}")
+
     input_abs = os.path.abspath(input_path)
     output_abs = os.path.abspath(output_path)
-    
+
     cmd = [
         FFMPEG_PATH, '-i', input_abs,
         '-vf', f'crop=min(iw,ih):min(iw,ih),scale={target_size}:{target_size}',
         '-c:a', 'copy', '-y', output_abs
     ]
-    
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+    print(f"Running ffmpeg command: {' '.join(cmd)}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     stdout, stderr = await process.communicate()
-    
+
     if process.returncode != 0:
-        error_msg = stderr.decode('utf-8', errors='ignore')
-        raise Exception(f"ffmpeg error: {error_msg[:200]}")
-    
+        error_text = stderr.decode('utf-8', errors='ignore')
+        raise Exception(f"ffmpeg error (code {process.returncode}): {error_text[:500]}")
+
     if not os.path.exists(output_abs):
-        raise Exception("Output file not created")
-    
+        raise Exception("Output file was not created.")
+
     return output_abs
 
 # ========== توابع کمکی Telethon ==========
@@ -733,10 +740,11 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
         try:
-            await convert_to_square_ffmpeg(file_path, square_path)
-            final_file_path = square_path
+            final_file_path = await convert_to_square_ffmpeg(file_path, square_path)
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. استفاده از ویدیوی اصلی...")
+            error_detail = str(e)
+            print(f"ffmpeg error detail: {error_detail}")  # لاگ در رندر
+            await status_msg.edit_text(f"⚠️ خطا در تبدیل: {error_detail[:200]}\nاستفاده از ویدیوی اصلی...")
             final_file_path = file_path
 
         await enable_auto_video(user_id, final_file_path)
@@ -759,7 +767,9 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
-        await status_msg.edit_text(f"❌ خطا: {str(e)}")
+        error_full = str(e)
+        print(f"Full error in handle_auto_video_file: {error_full}")  # لاگ در رندر
+        await status_msg.edit_text(f"❌ خطا: {error_full[:300]}")
         return AUTO_VIDEO_STATE
 
 # ---------- هندلر فایل عمومی ----------
@@ -804,10 +814,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
             square_path = file_path + "_square.mp4"
             try:
-                await convert_to_square_ffmpeg(file_path, square_path)
-                final_file_path = square_path
+                final_file_path = await convert_to_square_ffmpeg(file_path, square_path)
             except Exception as e:
-                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
+                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)[:200]}. ارسال ویدیوی اصلی...")
                 final_file_path = file_path
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
