@@ -67,6 +67,10 @@ try:
 except Exception:
     RawCallUpdate = None
 try:
+    from pytgcalls.types import ChatUpdate
+except Exception:
+    ChatUpdate = None
+try:
     from pytgcalls.types import CallConfig
 except Exception:
     CallConfig = None
@@ -251,11 +255,10 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
                 if isinstance(phone_call, PhoneCallRequested):
                     caller_id = getattr(phone_call, "admin_id", None)
                     print(
-                        f"Incoming PhoneCallRequested detected for owner {user_id}; caller={caller_id}",
+                        f"Incoming PhoneCallRequested detected for owner {user_id}; caller={caller_id}. "
+                        f"Waiting for PyTgCalls INCOMING_CALL event to answer.",
                         flush=True,
                     )
-                    if caller_id is not None:
-                        asyncio.create_task(answer_incoming_private_call(user_id, int(caller_id), "telethon_raw"))
         except Exception as e:
             print(f"Telethon raw phone update logger error for owner {user_id}: {e}", flush=True)
 
@@ -291,19 +294,19 @@ async def maybe_await(value):
     return value
 
 async def play_media_in_call(call_client, chat_id, video_path, *, incoming_private_call=False):
-    """Play media with both old and new PyTgCalls calling conventions.
+    """Play media in a call using one attempt for incoming private calls.
 
-    Important for private calls: in current py-tgcalls, answering an incoming
-    private call is done by calling play(user_id, stream, CallConfig()).
-    There is usually no separate answer_call() method anymore.
+    For incoming private calls, PyTgCalls creates an internal p2p config after
+    RawCallUpdate(Type.REQUESTED), then play(user_id, stream, CallConfig()) must
+    be called once. Retrying with a second stream can consume/drop that internal
+    state and make PyTgCalls start an outgoing RequestCallRequest instead.
     """
-    last_error = None
     config = None
     if incoming_private_call and CallConfig is not None:
         try:
             config = CallConfig()
         except Exception as e:
-            print(f"Could not create CallConfig, continuing without it: {e}")
+            print(f"Could not create CallConfig, continuing without it: {e}", flush=True)
             config = None
 
     async def call_play(stream_value):
@@ -312,26 +315,30 @@ async def play_media_in_call(call_client, chat_id, video_path, *, incoming_priva
                 return await maybe_await(call_client.play(chat_id, stream_value, config))
             return await maybe_await(call_client.play(chat_id, stream_value))
         except TypeError:
-            # Some old builds require keyword-style config.
             if config is not None:
-                try:
-                    return await maybe_await(call_client.play(chat_id, stream_value, config=config))
-                except TypeError:
-                    pass
+                return await maybe_await(call_client.play(chat_id, stream_value, config=config))
             raise
 
+    # For incoming private calls, do NOT retry. Use raw path first because the
+    # current py-tgcalls examples accept direct file/URL paths and one failed
+    # p2p attempt can invalidate the stored incoming-call state.
+    if incoming_private_call:
+        print(f"Calling PyTgCalls.play once for incoming private call: chat_id={chat_id}, path={video_path}", flush=True)
+        return await call_play(video_path)
+
+    last_error = None
     if MediaStream is not None:
         try:
             return await call_play(MediaStream(video_path))
         except Exception as e:
             last_error = e
-            print(f"MediaStream play failed, retrying with raw path: {e}")
+            print(f"MediaStream play failed for non-private call, retrying with raw path: {repr(e)}", flush=True)
 
     try:
         return await call_play(video_path)
     except Exception as e:
         if last_error:
-            raise Exception(f"play failed with MediaStream ({last_error}) and raw path ({e})")
+            raise Exception(f"play failed with MediaStream ({repr(last_error)}) and raw path ({repr(e)})")
         raise
 
 async def leave_call_safe(call_client, chat_id):
@@ -377,6 +384,20 @@ def is_incoming_private_call_update(update):
     """
     if update is None:
         return False
+
+
+    if ChatUpdate is not None:
+        try:
+            if isinstance(update, ChatUpdate):
+                status = getattr(update, "status", None)
+                incoming = getattr(getattr(ChatUpdate, "Status", None), "INCOMING_CALL", None)
+                if incoming is not None:
+                    try:
+                        return bool(status & incoming)
+                    except Exception:
+                        return status == incoming
+        except TypeError:
+            pass
 
     if RawCallUpdate is not None:
         try:
@@ -480,6 +501,17 @@ async def answer_call(chat_id, call_client, video_path):
         # after RawCallUpdate(Type.REQUESTED). There is no separate answer_call() method in
         # the main API, and calling a non-existent answer_call was why v3 looked enabled but
         # did not actually answer the ringing call.
+        try:
+            p2p = getattr(call_client, '_p2p_configs', {})
+            p2p_data = p2p.get(chat_id) if isinstance(p2p, dict) else None
+            print(
+                f"Before play: chat_id={chat_id}, has_p2p_config={p2p_data is not None}, "
+                f"outgoing={getattr(p2p_data, 'outgoing', None)}",
+                flush=True,
+            )
+        except Exception as debug_e:
+            print(f"Could not inspect p2p config before play: {debug_e}", flush=True)
+
         await play_media_in_call(call_client, chat_id, video_path, incoming_private_call=True)
 
         duration = await get_video_duration(video_path)
