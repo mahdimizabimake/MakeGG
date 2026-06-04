@@ -19,11 +19,17 @@ from telethon.tl.types import (
 )
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
+from pyrogram import Client as PyroClient
+from py_tgcalls import PyTgCalls
+from py_tgcalls.types import Call
+from py_tgcalls.types.input_stream import AudioStream, VideoStream, InputStream
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-if not BOT_TOKEN or not DATABASE_URL:
-    raise Exception("BOT_TOKEN and DATABASE_URL required")
+API_ID = int(os.environ.get('API_ID', 0))
+API_HASH = os.environ.get('API_HASH', '')
+if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
+    raise Exception("BOT_TOKEN, DATABASE_URL, API_ID, API_HASH are required")
 
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
@@ -106,7 +112,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== توابع ویدیو کال (برای ذخیره ویدیو) ==========
+# ========== ویدیو کال ==========
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
@@ -119,6 +125,56 @@ async def disable_auto_video(user_id):
             await cur.execute('UPDATE user_data SET auto_video_enabled = FALSE, auto_video_path = NULL WHERE user_id = %s', (user_id,))
             await conn.commit()
 
+call_clients = {}
+
+async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
+    pyro_client = PyroClient(f"user_{user_id}", api_id, api_hash, session_string=session_string)
+    await pyro_client.start()
+    call_client = PyTgCalls(pyro_client)
+    await call_client.start()
+    return call_client
+
+async def answer_call(chat_id, call_client, video_path):
+    try:
+        await call_client.answer_call(chat_id)
+        await call_client.play(
+            chat_id,
+            InputStream(
+                AudioStream(video_path),
+                VideoStream(video_path)
+            )
+        )
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
+        duration = float(result.stdout.strip())
+        await asyncio.sleep(duration)
+        await call_client.leave_call(chat_id)
+    except Exception as e:
+        print(f"Error answering call for {chat_id}: {e}")
+
+async def restore_auto_video_calls():
+    async with await get_conn() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute('SELECT user_id, api_id, api_hash, session_string, auto_video_path FROM user_data WHERE auto_video_enabled = TRUE AND session_string IS NOT NULL')
+            active_users = await cur.fetchall()
+            for user in active_users:
+                user_id = user['user_id']
+                api_id_val = user['api_id']
+                api_hash_val = user['api_hash']
+                session_str = user['session_string']
+                video_path = user['auto_video_path']
+                if video_path and os.path.exists(video_path):
+                    call_client = await setup_pytgcalls(user_id, session_str, api_id_val, api_hash_val)
+                    if call_client:
+                        call_clients[user_id] = call_client
+                        @call_client.on_call()
+                        async def on_incoming_call(call: Call):
+                            if call.chat_id == user_id:
+                                data = await get_user_data(user_id)
+                                vid_path = data.get('auto_video_path')
+                                if vid_path and os.path.exists(vid_path):
+                                    await answer_call(call.chat_id, call_clients[user_id], vid_path)
+
+# ========== تبدیل ویدیو به مربع ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
@@ -239,7 +295,7 @@ async def parse_message_link(link):
         chat_id = chat_part
     return chat_id, msg_id
 
-# ========== منوی اصلی (با دکمه‌های ویدیو کال) ==========
+# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
@@ -272,7 +328,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -565,6 +621,54 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
+# ---------- وضعیت و خروج ----------
+async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = await get_user_data(query.from_user.id)
+    if not data or not data['session_string']:
+        text = "❌ لاگین نیستید"
+    else:
+        text = f"✅ لاگین هستید\n🎯 چت هدف: `{data['target_chat_title'] or data['target_chat_id'] if data['target_chat_id'] else 'تنظیم نشده'}`\n🔁 ریپلی: {'فعال' if data['reply_active'] else 'غیرفعال'}\n📹 ویدیو کال: {'فعال' if data.get('auto_video_enabled') else 'غیرفعال'}"
+    await query.edit_message_text(text, parse_mode='Markdown')
+
+async def clear_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    await clear_reply(user_id)
+    await query.edit_message_text("✅ ریپلی غیرفعال شد.")
+    await asyncio.sleep(1)
+    await main_menu(update, context)
+
+async def disable_auto_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    await disable_auto_video(user_id)
+    if user_id in call_clients:
+        try:
+            await call_clients[user_id].stop()
+            del call_clients[user_id]
+        except:
+            pass
+    await query.edit_message_text("✅ قابلیت ویدیو کال غیرفعال شد.")
+    await asyncio.sleep(1)
+    await main_menu(update, context)
+
+async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    await save_user_data(user_id, session_string="")
+    if user_id in call_clients:
+        try:
+            await call_clients[user_id].stop()
+            del call_clients[user_id]
+        except:
+            pass
+    await query.edit_message_text("✅ از اکانت خارج شدید.")
+
 # ---------- ویدیو کال ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -604,46 +708,21 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
             final_file_path = file_path
         await enable_auto_video(user_id, final_file_path)
+        if user_id not in call_clients:
+            call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
+            if call_client:
+                call_clients[user_id] = call_client
+                @call_client.on_call()
+                async def on_incoming_call(call: Call):
+                    if call.chat_id == user_id:
+                        current_data = await get_user_data(user_id)
+                        vid_path = current_data.get('auto_video_path')
+                        if vid_path and os.path.exists(vid_path):
+                            await answer_call(call.chat_id, call_clients[user_id], vid_path)
         await status_msg.edit_text("✅ تنظیم ویدیو کال با موفقیت انجام شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود و پس از اتمام قطع می‌گردد.")
         await main_menu(update, context)
     except Exception as e:
         await status_msg.edit_text(f"❌ خطا: {str(e)}")
-
-# ---------- وضعیت، لغو ریپلی، لغو ویدیو کال و خروج ----------
-async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = await get_user_data(query.from_user.id)
-    if not data or not data['session_string']:
-        text = "❌ لاگین نیستید"
-    else:
-        text = f"✅ لاگین هستید\n🎯 چت هدف: `{data['target_chat_title'] or data['target_chat_id'] if data['target_chat_id'] else 'تنظیم نشده'}`\n🔁 ریپلی: {'فعال' if data['reply_active'] else 'غیرفعال'}\n📹 ویدیو کال: {'فعال' if data.get('auto_video_enabled') else 'غیرفعال'}"
-    await query.edit_message_text(text, parse_mode='Markdown')
-
-async def clear_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    await clear_reply(user_id)
-    await query.edit_message_text("✅ ریپلی غیرفعال شد.")
-    await asyncio.sleep(1)
-    await main_menu(update, context)
-
-async def disable_auto_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    await disable_auto_video(user_id)
-    await query.edit_message_text("✅ قابلیت ویدیو کال غیرفعال شد.")
-    await asyncio.sleep(1)
-    await main_menu(update, context)
-
-async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    await save_user_data(user_id, session_string="")
-    await query.edit_message_text("✅ از اکانت خارج شدید.")
 
 # ---------- هندلر فایل اصلی ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,7 +805,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ---------- وب سرور ----------
+# ========== وب سرور و اجرای اصلی ==========
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -741,6 +820,7 @@ async def run_web():
 
 async def main():
     await init_db()
+    await restore_auto_video_calls()
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
