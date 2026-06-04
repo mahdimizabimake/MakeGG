@@ -1,9 +1,10 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
 # نصب وابستگی‌های سیستمی
 RUN apt-get update && apt-get install -y \
+    git \
     ffmpeg \
     gcc \
     g++ \
