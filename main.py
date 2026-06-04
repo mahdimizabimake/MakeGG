@@ -39,7 +39,7 @@ API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CH
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 AUTO_VIDEO_STATE = 10
 
-# ========== دیتابیس ==========
+# ========== دیتابیس (بدون تغییر) ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -677,7 +677,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- تنظیم ویدیو کال (دانلود مستقیم با file_id) ----------
+# ========== تنظیم ویدیو کال (نسخه اصلاح شده با مدیریت خطای دانلود) ==========
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -705,7 +705,9 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        file_id = update.message.video.file_id
+        msg_id = update.message.message_id
+        chat_id = update.effective_chat.id
+
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         if not await ensure_session_active(client):
@@ -713,9 +715,20 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await client.disconnect()
             return ConversationHandler.END
 
-        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
-        # دانلود مستقیم با file_id
-        file_path = await client.download_media(file_id)
+        # روش اول: دریافت پیام و دانلود
+        try:
+            tele_msg = await client.get_messages(chat_id, ids=msg_id)
+            if tele_msg and tele_msg.media:
+                await status_msg.edit_text("📥 در حال دانلود ویدیو...")
+                file_path = await tele_msg.download_media()
+            else:
+                raise Exception("media not found in message")
+        except Exception as e:
+            # روش دوم: دانلود مستقیم با file_id
+            await status_msg.edit_text("📥 روش جایگزین: دانلود با file_id...")
+            file_id = update.message.video.file_id
+            file_path = await client.download_media(file_id)
+
         await client.disconnect()
         if not file_path or not os.path.exists(file_path):
             await status_msg.edit_text("❌ خطا در دانلود فایل.")
@@ -852,7 +865,6 @@ async def main():
     await init_db()
     await restore_auto_video_calls()
     application = Application.builder().token(BOT_TOKEN).build()
-    # لاگین
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -864,7 +876,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # چت هدف
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
@@ -875,7 +886,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # ریپلی
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_reply_start, pattern='^set_reply$')],
         states={
@@ -886,7 +896,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # ویدیو کال
     auto_video_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_auto_video_start, pattern='^set_auto_video$')],
         states={
@@ -895,13 +904,11 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(auto_video_conv)
-    # سایر دکمه‌ها
     application.add_handler(CallbackQueryHandler(status_callback, pattern='^status$'))
     application.add_handler(CallbackQueryHandler(clear_reply_callback, pattern='^clear_reply$'))
     application.add_handler(CallbackQueryHandler(disable_auto_video_callback, pattern='^disable_auto_video$'))
     application.add_handler(CallbackQueryHandler(logout_callback, pattern='^logout$'))
     application.add_handler(CommandHandler('start', start))
-    # هندلر فایل عمومی
     application.add_handler(MessageHandler(filters.AUDIO | filters.VIDEO | filters.VOICE | filters.VIDEO_NOTE, handle_file))
     await application.initialize()
     await application.start()
