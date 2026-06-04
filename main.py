@@ -1,3 +1,11 @@
+import pytgcalls
+print(dir(pytgcalls))
+import pytgcalls.types
+print(dir(pytgcalls.types))
+import pkgutil
+import pytgcalls
+
+print([m.name for m in pkgutil.iter_modules(pytgcalls.__path__)])
 import asyncio
 import os
 import re
