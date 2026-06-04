@@ -56,6 +56,14 @@ try:
     from pytgcalls.types import MediaStream
 except Exception:
     MediaStream = None
+try:
+    from pytgcalls.types import RawCallUpdate
+except Exception:
+    RawCallUpdate = None
+try:
+    from pytgcalls.types import CallConfig
+except Exception:
+    CallConfig = None
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -229,19 +237,45 @@ async def maybe_await(value):
         return await value
     return value
 
-async def play_media_in_call(call_client, chat_id, video_path):
-    """Play media with both old and new PyTgCalls calling conventions."""
+async def play_media_in_call(call_client, chat_id, video_path, *, incoming_private_call=False):
+    """Play media with both old and new PyTgCalls calling conventions.
+
+    Important for private calls: in current py-tgcalls, answering an incoming
+    private call is done by calling play(user_id, stream, CallConfig()).
+    There is usually no separate answer_call() method anymore.
+    """
     last_error = None
+    config = None
+    if incoming_private_call and CallConfig is not None:
+        try:
+            config = CallConfig()
+        except Exception as e:
+            print(f"Could not create CallConfig, continuing without it: {e}")
+            config = None
+
+    async def call_play(stream_value):
+        try:
+            if config is not None:
+                return await maybe_await(call_client.play(chat_id, stream_value, config))
+            return await maybe_await(call_client.play(chat_id, stream_value))
+        except TypeError:
+            # Some old builds require keyword-style config.
+            if config is not None:
+                try:
+                    return await maybe_await(call_client.play(chat_id, stream_value, config=config))
+                except TypeError:
+                    pass
+            raise
 
     if MediaStream is not None:
         try:
-            return await maybe_await(call_client.play(chat_id, MediaStream(video_path)))
+            return await call_play(MediaStream(video_path))
         except Exception as e:
             last_error = e
             print(f"MediaStream play failed, retrying with raw path: {e}")
 
     try:
-        return await maybe_await(call_client.play(chat_id, video_path))
+        return await call_play(video_path)
     except Exception as e:
         if last_error:
             raise Exception(f"play failed with MediaStream ({last_error}) and raw path ({e})")
@@ -281,26 +315,46 @@ def get_update_chat_id(update):
 
     return None
 
-def is_probably_private_call_update(update):
+def is_incoming_private_call_update(update):
+    """Return True only for incoming private-call request updates.
+
+    New py-tgcalls sends RawCallUpdate(Type.REQUESTED) when a private call is
+    ringing. The previous v3 code treated generic call-like updates as a call
+    to answer and then tried answer_call(); current py-tgcalls expects play().
+    """
     if update is None:
         return False
 
-    if Call is not None:
+    if RawCallUpdate is not None:
         try:
-            if isinstance(update, Call):
-                return True
+            if isinstance(update, RawCallUpdate):
+                status = getattr(update, "status", None)
+                requested = getattr(getattr(RawCallUpdate, "Type", None), "REQUESTED", None)
+                if requested is None:
+                    print(f"RawCallUpdate received without REQUESTED enum info: {update}")
+                    return True
+                try:
+                    return bool(status & requested)
+                except Exception:
+                    return status == requested
         except TypeError:
             pass
 
     name = update.__class__.__name__.lower()
-    if "call" in name and "group" not in name and "participant" not in name:
-        return True
+    if "rawcallupdate" in name or ("call" in name and "group" not in name and "participant" not in name):
+        status = getattr(update, "status", None)
+        status_name = str(status).lower()
+        if "request" in status_name or "requested" in status_name:
+            return True
+        # Fallback for versions where status is an int flag and class name is already private-call-specific.
+        if status is not None and "rawcallupdate" in name:
+            return True
 
     for attr in ("call", "phone_call"):
         value = getattr(update, attr, None)
         if value is not None:
             value_name = value.__class__.__name__.lower()
-            if "call" in value_name and "group" not in value_name:
+            if "requested" in value_name or ("call" in value_name and "group" not in value_name):
                 return True
 
     return False
@@ -308,25 +362,32 @@ def is_probably_private_call_update(update):
 def register_incoming_call_handler(call_client, user_id):
     async def on_incoming_call(*args):
         update = args[-1] if args else None
-        if not is_probably_private_call_update(update):
+        print(f"PyTgCalls update received for user {user_id}: {update!r}")
+
+        if not is_incoming_private_call_update(update):
             return
 
         chat_id = get_update_chat_id(update)
         if chat_id is None:
-            print(f"Incoming call update without chat_id: {update}")
+            print(f"Incoming private call update without user_id/chat_id: {update!r}")
             return
 
         data = await get_user_data(user_id)
         vid_path = data.get('auto_video_path') if data else None
         if vid_path and os.path.exists(vid_path):
+            print(f"Incoming private call from {chat_id}; answering with {vid_path}")
             await answer_call(chat_id, call_clients[user_id], vid_path)
+        else:
+            print(f"Incoming private call from {chat_id}, but video path is missing: {vid_path}")
 
     if hasattr(call_client, "on_call"):
         call_client.on_call()(on_incoming_call)
+        print(f"Registered incoming call handler via on_call for user {user_id}")
         return
 
     if hasattr(call_client, "on_update"):
         call_client.on_update()(on_incoming_call)
+        print(f"Registered incoming call handler via on_update for user {user_id}")
         return
 
     raise Exception(
@@ -336,15 +397,11 @@ def register_incoming_call_handler(call_client, user_id):
 
 async def answer_call(chat_id, call_client, video_path):
     try:
-        answer_method = getattr(call_client, "answer_call", None)
-        if not answer_method:
-            raise Exception(
-                "این نسخه PyTgCalls متد answer_call ندارد؛ "
-                "برای تماس خصوصی باید نسخه‌ای نصب شود که private calls را پشتیبانی کند."
-            )
-
-        await maybe_await(answer_method(chat_id))
-        await play_media_in_call(call_client, chat_id, video_path)
+        # In current py-tgcalls, private incoming calls are accepted by play(user_id, stream)
+        # after RawCallUpdate(Type.REQUESTED). There is no separate answer_call() method in
+        # the main API, and calling a non-existent answer_call was why v3 looked enabled but
+        # did not actually answer the ringing call.
+        await play_media_in_call(call_client, chat_id, video_path, incoming_private_call=True)
 
         duration = await get_video_duration(video_path)
         await asyncio.sleep(min(duration, 65))
