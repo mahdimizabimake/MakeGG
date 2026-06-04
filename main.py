@@ -20,9 +20,9 @@ from telethon.tl.types import (
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
 from pytgcalls import PyTgCalls
-from pytgcalls.types import Update as CallUpdate
+from pytgcalls.types import Update as CallUpdate, Call
 from pytgcalls.types.stream import StreamVideoEnded
-from pytgcalls.types.input_stream import InputStream, InputAudioStream, InputVideoStream
+from pytgcalls.types.input_stream import AudioStream, VideoStream, InputStream
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -58,7 +58,6 @@ async def init_db():
                 await conn.execute("ALTER TABLE user_data ADD COLUMN reply_active BOOLEAN DEFAULT FALSE")
             if 'reply_chat_id' not in columns:
                 await conn.execute("ALTER TABLE user_data ADD COLUMN reply_chat_id BIGINT DEFAULT NULL")
-            # اضافه کردن ستون‌های مربوط به ویدیو کال
             if 'auto_video_enabled' not in columns:
                 await conn.execute("ALTER TABLE user_data ADD COLUMN auto_video_enabled BOOLEAN DEFAULT FALSE")
             if 'auto_video_path' not in columns:
@@ -68,7 +67,7 @@ async def init_db():
 async def get_user_data(user_id):
     async with await get_conn() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute('SELECT api_id, api_hash, session_string, target_chat_id, target_chat_title, reply_msg_id, reply_active, reply_chat_id, auto_video_enabled, auto_video_path FROM user_data WHERE user_id = %s', (user_id,))
+            await cur.execute('SELECT * FROM user_data WHERE user_id = %s', (user_id,))
             return await cur.fetchone()
 
 async def save_user_data(user_id, api_id=None, api_hash=None, session_string=None, target_chat_id=None, target_chat_title=None):
@@ -111,7 +110,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== توابع ویدیو کال ==========
+# ========== توابع ویدیو کال (سازگار با pytgcalls 2.1.0) ==========
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
@@ -124,11 +123,9 @@ async def disable_auto_video(user_id):
             await cur.execute('UPDATE user_data SET auto_video_enabled = FALSE, auto_video_path = NULL WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ذخیره کلاینت‌های PyTgCalls در یک دیکشنری سراسری
 call_clients = {}
 
 async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
-    """راه‌اندازی PyTgCalls برای یک کاربر"""
     telethon_client = TelegramClient(StringSession(session_string), api_id, api_hash)
     await telethon_client.connect()
     if not await ensure_session_active(telethon_client):
@@ -139,30 +136,29 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     return call_client
 
 async def answer_call(chat_id, call_client, video_path):
-    """پاسخ به تماس ورودی و پخش ویدیو"""
     try:
-        # پاسخ به تماس
         await call_client.answer_call(chat_id)
-        # پخش ویدیو
         await call_client.play(
             chat_id,
             InputStream(
-                InputAudioStream(video_path),
-                InputVideoStream(video_path)
+                AudioStream(video_path),
+                VideoStream(video_path)
             )
         )
-        # منتظر پایان ویدیو
-        await asyncio.sleep(0.5)
+        # Wait for video to finish
         while True:
             await asyncio.sleep(1)
-            if not call_client.is_playing(chat_id):
-                break
-        # قطع تماس پس از اتمام ویدیو
+            # Check if still playing (there's no direct method, so we sleep for duration)
+            # Instead, we can assume the video duration and leave after that.
+            # Let's get duration using ffprobe
+            import json
+            result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
+            duration = float(result.stdout.strip())
+            await asyncio.sleep(duration)
+            break
         await call_client.leave_call(chat_id)
-        return True
     except Exception as e:
         print(f"Error answering call for {chat_id}: {e}")
-        return False
 
 # ========== تبدیل ویدیو به مربع بدون حاشیه ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
@@ -224,7 +220,6 @@ async def send_as_video_note(client, chat, file_path, duration, reply_to=None):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False, reply_to=reply_to)
 
-# ========== گرفتن ۱۰ دیالوگ و پیام ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -286,7 +281,7 @@ async def parse_message_link(link):
         chat_id = chat_part
     return chat_id, msg_id
 
-# ========== منوی اصلی (با اضافه شدن دکمه‌های ویدیو کال) ==========
+# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
@@ -485,7 +480,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- تنظیم ریپلی ----------
+# ---------- تنظیم ریپلی (بدون تغییر) ----------
 async def set_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -637,7 +632,6 @@ async def disable_auto_video_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
     user_id = query.from_user.id
     await disable_auto_video(user_id)
-    # توقف کلاینت PyTgCalls اگر فعال است
     if user_id in call_clients:
         try:
             await call_clients[user_id].stop()
@@ -653,7 +647,6 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     await save_user_data(user_id, session_string="")
-    # توقف PyTgCalls اگر وجود داشت
     if user_id in call_clients:
         try:
             await call_clients[user_id].stop()
@@ -692,7 +685,6 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await status_msg.edit_text("📥 در حال دانلود ویدیو...")
         file_obj = await msg.video.get_file()
         file_path = str(await file_obj.download_to_drive())
-        # تبدیل به مربع
         await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
         try:
@@ -701,36 +693,25 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
             final_file_path = file_path
-        # ذخیره مسیر
         await enable_auto_video(user_id, final_file_path)
         # راه‌اندازی PyTgCalls برای این کاربر
         if user_id not in call_clients:
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
             if call_client:
                 call_clients[user_id] = call_client
-                # هندلر تماس ورودی
-                @call_client.on_stream_end()
-                async def on_stream_end(_, call_update: CallUpdate):
-                    # وقتی ویدیو تمام شد، تماس قطع می‌شود
-                    pass
-                # هندلر اصلی برای تماس‌های جدید (روش صحیح PyTgCalls 5.0)
-                # در PyTgCalls نسخه جدید، باید از decorator @call_client.on_call() استفاده کنیم
-                try:
-                    @call_client.on_call()
-                    async def on_incoming_call(call_update: CallUpdate):
-                        chat_id = call_update.chat_id
-                        if chat_id == user_id:
-                            video_path = (await get_user_data(user_id)).get('auto_video_path')
-                            if video_path and os.path.exists(video_path):
-                                await answer_call(chat_id, call_client, video_path)
-                except Exception as e:
-                    print(f"Error setting up call handler: {e}")
+                # نصب هندلر تماس ورودی (روش صحیح برای pytgcalls 2.1.0)
+                @call_client.on_call()
+                async def on_incoming_call(call: Call):
+                    if call.chat_id == user_id:
+                        video_path = (await get_user_data(user_id)).get('auto_video_path')
+                        if video_path and os.path.exists(video_path):
+                            await answer_call(call.chat_id, call_client, video_path)
         await status_msg.edit_text("✅ تنظیم ویدیو کال با موفقیت انجام شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود و پس از اتمام قطع می‌گردد.")
         await main_menu(update, context)
     except Exception as e:
         await status_msg.edit_text(f"❌ خطا: {str(e)}")
 
-# ---------- هندلر فایل (همان قبلی با اضافه شدن پشتیبانی از ویدیو کال) ----------
+# ---------- هندلر فایل (همان قبلی) ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -739,7 +720,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data or not data['session_string']:
             await status_msg.edit_text("❌ لاگین نیستید. از منو لاگین کنید.")
             return
-        # اگر ریپلی فعال باشد
         if data['reply_active'] and data['reply_chat_id'] and data['reply_msg_id']:
             target_chat_id = data['reply_chat_id']
             reply_to = data['reply_msg_id']
@@ -825,9 +805,8 @@ async def run_web():
     await site.start()
     await asyncio.Event().wait()
 
-# ---------- راه‌اندازی اولیه و بازیابی ویدیو کال برای کاربران ----------
+# ---------- بازیابی ویدیو کال ----------
 async def restore_auto_video_calls():
-    """در زمان استارت ربات، کلاینت‌های PyTgCalls را برای کاربرانی که قابلیت فعال دارند راه‌اندازی کن"""
     async with await get_conn() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute('SELECT user_id, api_id, api_hash, session_string, auto_video_path FROM user_data WHERE auto_video_enabled = TRUE AND session_string IS NOT NULL')
@@ -842,23 +821,18 @@ async def restore_auto_video_calls():
                     call_client = await setup_pytgcalls(user_id, session_str, api_id, api_hash)
                     if call_client:
                         call_clients[user_id] = call_client
-                        try:
-                            @call_client.on_call()
-                            async def on_incoming_call(call_update: CallUpdate):
-                                chat_id = call_update.chat_id
-                                if chat_id == user_id:
-                                    current_data = await get_user_data(user_id)
-                                    vid_path = current_data.get('auto_video_path')
-                                    if vid_path and os.path.exists(vid_path):
-                                        await answer_call(chat_id, call_client, vid_path)
-                        except Exception as e:
-                            print(f"Error setting call handler for user {user_id}: {e}")
+                        @call_client.on_call()
+                        async def on_incoming_call(call: Call):
+                            if call.chat_id == user_id:
+                                current_data = await get_user_data(user_id)
+                                vid_path = current_data.get('auto_video_path')
+                                if vid_path and os.path.exists(vid_path):
+                                    await answer_call(call.chat_id, call_client, vid_path)
 
 async def main():
     await init_db()
     await restore_auto_video_calls()
     application = Application.builder().token(BOT_TOKEN).build()
-    # لاگین
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -870,7 +844,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم چت هدف
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
@@ -881,7 +854,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم ریپلی
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_reply_start, pattern='^set_reply$')],
         states={
@@ -892,12 +864,10 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم ویدیو کال
+    # هندلر تنظیم ویدیو کال
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_auto_video_start, pattern='^set_auto_video$')],
-        states={
-            # مرحله دریافت ویدیو
-        },
+        states={},
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
     application.add_handler(MessageHandler(filters.VIDEO, handle_auto_video_file))
