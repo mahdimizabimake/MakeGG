@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: telegram-main-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+
+  - type: worker
+    name: video-call-handler
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python video_call_handler.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
