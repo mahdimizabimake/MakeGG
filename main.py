@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import os
 import re
 import struct
@@ -47,7 +48,14 @@ except Exception:
         PYROGRAM_SESSION_STRING_FORMAT = ">BI?256sQ?"
 
 from pytgcalls import PyTgCalls
-from pytgcalls.types import Call, MediaStream
+try:
+    from pytgcalls.types import Call
+except Exception:
+    Call = None
+try:
+    from pytgcalls.types import MediaStream
+except Exception:
+    MediaStream = None
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -197,7 +205,7 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     await pyro_client.start()
 
     call_client = PyTgCalls(pyro_client)
-    await call_client.start()
+    await maybe_await(call_client.start())
     return call_client
 
 async def get_video_duration(video_path):
@@ -216,16 +224,131 @@ async def get_video_duration(video_path):
     except:
         return 30
 
+async def maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+async def play_media_in_call(call_client, chat_id, video_path):
+    """Play media with both old and new PyTgCalls calling conventions."""
+    last_error = None
+
+    if MediaStream is not None:
+        try:
+            return await maybe_await(call_client.play(chat_id, MediaStream(video_path)))
+        except Exception as e:
+            last_error = e
+            print(f"MediaStream play failed, retrying with raw path: {e}")
+
+    try:
+        return await maybe_await(call_client.play(chat_id, video_path))
+    except Exception as e:
+        if last_error:
+            raise Exception(f"play failed with MediaStream ({last_error}) and raw path ({e})")
+        raise
+
+async def leave_call_safe(call_client, chat_id):
+    for method_name in ("leave_call", "stop", "close"):
+        method = getattr(call_client, method_name, None)
+        if method:
+            try:
+                if method_name == "stop":
+                    return await maybe_await(method())
+                return await maybe_await(method(chat_id))
+            except TypeError:
+                try:
+                    return await maybe_await(method())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+def get_update_chat_id(update):
+    for attr in ("chat_id", "user_id", "peer_id"):
+        value = getattr(update, attr, None)
+        if value is not None:
+            return value
+
+    nested_attrs = ("call", "phone_call", "update", "raw_update")
+    for parent_attr in nested_attrs:
+        parent = getattr(update, parent_attr, None)
+        if parent is None:
+            continue
+        for attr in ("chat_id", "user_id", "peer_id", "participant_id", "admin_id"):
+            value = getattr(parent, attr, None)
+            if value is not None:
+                return value
+
+    return None
+
+def is_probably_private_call_update(update):
+    if update is None:
+        return False
+
+    if Call is not None:
+        try:
+            if isinstance(update, Call):
+                return True
+        except TypeError:
+            pass
+
+    name = update.__class__.__name__.lower()
+    if "call" in name and "group" not in name and "participant" not in name:
+        return True
+
+    for attr in ("call", "phone_call"):
+        value = getattr(update, attr, None)
+        if value is not None:
+            value_name = value.__class__.__name__.lower()
+            if "call" in value_name and "group" not in value_name:
+                return True
+
+    return False
+
+def register_incoming_call_handler(call_client, user_id):
+    async def on_incoming_call(*args):
+        update = args[-1] if args else None
+        if not is_probably_private_call_update(update):
+            return
+
+        chat_id = get_update_chat_id(update)
+        if chat_id is None:
+            print(f"Incoming call update without chat_id: {update}")
+            return
+
+        data = await get_user_data(user_id)
+        vid_path = data.get('auto_video_path') if data else None
+        if vid_path and os.path.exists(vid_path):
+            await answer_call(chat_id, call_clients[user_id], vid_path)
+
+    if hasattr(call_client, "on_call"):
+        call_client.on_call()(on_incoming_call)
+        return
+
+    if hasattr(call_client, "on_update"):
+        call_client.on_update()(on_incoming_call)
+        return
+
+    raise Exception(
+        "نسخه PyTgCalls نصب‌شده نه on_call دارد و نه on_update. "
+        "پکیج py-tgcalls را آپدیت کنید."
+    )
+
 async def answer_call(chat_id, call_client, video_path):
     try:
-        await call_client.answer_call(chat_id)
-        await call_client.play(chat_id, MediaStream(video_path))
+        answer_method = getattr(call_client, "answer_call", None)
+        if not answer_method:
+            raise Exception(
+                "این نسخه PyTgCalls متد answer_call ندارد؛ "
+                "برای تماس خصوصی باید نسخه‌ای نصب شود که private calls را پشتیبانی کند."
+            )
+
+        await maybe_await(answer_method(chat_id))
+        await play_media_in_call(call_client, chat_id, video_path)
+
         duration = await get_video_duration(video_path)
-        await asyncio.sleep(duration)
-        try:
-            await call_client.leave_call(chat_id)
-        except:
-            pass
+        await asyncio.sleep(min(duration, 65))
+        await leave_call_safe(call_client, chat_id)
     except Exception as e:
         print(f"Error answering call for {chat_id}: {e}")
 
@@ -244,12 +367,7 @@ async def restore_auto_video_calls():
                     call_client = await setup_pytgcalls(user_id, session_str, api_id_val, api_hash_val)
                     if call_client:
                         call_clients[user_id] = call_client
-                        @call_client.on_call()
-                        async def on_incoming_call(call: Call, bound_user_id=user_id):
-                            data = await get_user_data(bound_user_id)
-                            vid_path = data.get('auto_video_path') if data else None
-                            if vid_path and os.path.exists(vid_path):
-                                await answer_call(call.chat_id, call_clients[bound_user_id], vid_path)
+                        register_incoming_call_handler(call_client, user_id)
 
 # ========== تبدیل ویدیو به مربع با استفاده از asyncio.create_subprocess_exec ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
@@ -265,16 +383,27 @@ async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     input_abs = os.path.abspath(input_path)
     output_abs = os.path.abspath(output_path)
 
+    # The comma inside min(iw,ih) must be escaped for FFmpeg's filter parser.
+    # Without escaping, FFmpeg 7 may split the expression as a new filter and exit with code 8.
+    video_filter = f'crop=min(iw\\,ih):min(iw\\,ih),scale={target_size}:{target_size},setsar=1,fps=30'
+
     cmd = [
-        FFMPEG_PATH, '-i', input_abs,
-        '-vf', f'crop=min(iw,ih):min(iw,ih),scale={target_size}:{target_size}',
+        FFMPEG_PATH,
+        '-hide_banner',
+        '-y',
+        '-i', input_abs,
+        '-map', '0:v:0',
+        '-map', '0:a?',
+        '-vf', video_filter,
         '-c:v', 'libx264',
         '-preset', 'veryfast',
+        '-crf', '23',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '128k',
         '-movflags', '+faststart',
-        '-y', output_abs
+        '-shortest',
+        output_abs
     ]
 
     print(f"Running ffmpeg command: {' '.join(cmd)}")
@@ -825,12 +954,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
             if call_client:
                 call_clients[user_id] = call_client
-                @call_client.on_call()
-                async def on_incoming_call(call: Call, bound_user_id=user_id):
-                    current_data = await get_user_data(bound_user_id)
-                    vid_path = current_data.get('auto_video_path') if current_data else None
-                    if vid_path and os.path.exists(vid_path):
-                        await answer_call(call.chat_id, call_clients[bound_user_id], vid_path)
+                register_incoming_call_handler(call_client, user_id)
 
         await status_msg.edit_text("✅ ویدیو با موفقیت تنظیم شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود.")
         if os.path.exists(file_path) and file_path != final_file_path:
