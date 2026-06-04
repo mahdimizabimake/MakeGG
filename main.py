@@ -706,22 +706,38 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        # دانلود با استفاده از Telethon (برای جلوگیری از خطای unpack)
-        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
-        file_id = update.message.video.file_id
-        client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
-        await client.connect()
-        if not await ensure_session_active(client):
-            await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
-            await client.disconnect()
-            return ConversationHandler.END
-        # دریافت مسیر فایل با استفاده از متد download_media (با file_id)
-        file_path = await client.download_media(file_id)
-        await client.disconnect()
+        # دانلود فایل با روش مقاوم (اول python-telegram-bot، در صورت خطا از telethon)
+        file_path = None
+        try:
+            await status_msg.edit_text("📥 در حال دانلود ویدیو...")
+            file = await update.message.video.get_file()
+            file_path = str(await file.download_to_drive())
+        except Exception as e:
+            if "unpack requires a buffer" in str(e):
+                await status_msg.edit_text("📥 روش جایگزین: دانلود با Telethon...")
+                client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
+                await client.connect()
+                if not await ensure_session_active(client):
+                    await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
+                    await client.disconnect()
+                    return ConversationHandler.END
+                # دریافت پیام با استفاده از message_id
+                msg_id = update.message.message_id
+                chat_id = update.effective_chat.id
+                tele_msg = await client.get_messages(chat_id, ids=msg_id)
+                if tele_msg and tele_msg.media:
+                    file_path = await tele_msg.download_media()
+                await client.disconnect()
+                if not file_path:
+                    await status_msg.edit_text("❌ خطا در دانلود فایل با روش جایگزین.")
+                    return AUTO_VIDEO_STATE
+                file_path = str(file_path)
+            else:
+                raise e
+
         if not file_path or not os.path.exists(file_path):
             await status_msg.edit_text("❌ خطا در دانلود فایل.")
             return AUTO_VIDEO_STATE
-        file_path = str(file_path)
 
         await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
@@ -732,10 +748,8 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
             final_file_path = file_path
 
-        # ذخیره مسیر در دیتابیس
         await enable_auto_video(user_id, final_file_path)
 
-        # راه‌اندازی PyTgCalls اگر قبلاً نبود
         if user_id not in call_clients:
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
             if call_client:
@@ -749,10 +763,8 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
                             await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
         await status_msg.edit_text("✅ ویدیو با موفقیت تنظیم شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود.")
-        # پاک کردن فایل اصلی اگر متفاوت است
         if os.path.exists(file_path) and file_path != final_file_path:
             os.remove(file_path)
-        # بازگشت به منو
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
