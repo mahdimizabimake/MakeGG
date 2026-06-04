@@ -1,11 +1,7 @@
-import pytgcalls
-print(dir(pytgcalls))
+from pytgcalls import PyTgCalls
+print(dir(PyTgCalls))
 import pytgcalls.types
 print(dir(pytgcalls.types))
-import pkgutil
-import pytgcalls
-
-print([m.name for m in pkgutil.iter_modules(pytgcalls.__path__)])
 import asyncio
 import os
 import re
@@ -29,8 +25,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
 from pyrogram import Client as PyroClient
 from pytgcalls import PyTgCalls
-from pytgcalls.types import Call
-from pytgcalls.types.input_stream import AudioStream, VideoStream, InputStream
+from pytgcalls.types import Call, MediaStream
 
 # ========== متغیرهای محیطی ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -44,7 +39,7 @@ if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
 FFMPEG_PATH = "ffmpeg"
 FFPROBE_PATH = "ffprobe"
 
-# ========== مراحل مکالمه (همانند قبل) ==========
+# ========== مراحل مکالمه ==========
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 
@@ -151,17 +146,38 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
 async def answer_call(chat_id, call_client, video_path):
     try:
         await call_client.answer_call(chat_id)
+
         await call_client.play(
             chat_id,
-            InputStream(
-                AudioStream(video_path),
-                VideoStream(video_path)
-            )
+            MediaStream(video_path)
         )
-        result = subprocess.run([FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
-        duration = float(result.stdout.strip())
+
+        result = subprocess.run(
+            [
+                FFPROBE_PATH,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        duration = 30  # fallback duration
+
+        try:
+            duration = float(result.stdout.strip())
+        except Exception:
+            pass
+
         await asyncio.sleep(duration)
-        await call_client.leave_call(chat_id)
+
+        try:
+            await call_client.leave_call(chat_id)
+        except Exception:
+            pass
+
     except Exception as e:
         print(f"Error answering call for {chat_id}: {e}")
 
@@ -342,7 +358,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
