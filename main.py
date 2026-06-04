@@ -24,6 +24,7 @@ from py_tgcalls import PyTgCalls
 from py_tgcalls.types import Call
 from py_tgcalls.types.input_stream import AudioStream, VideoStream, InputStream
 
+# ========== متغیرهای محیطی ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 API_ID = int(os.environ.get('API_ID', 0))
@@ -31,6 +32,16 @@ API_HASH = os.environ.get('API_HASH', '')
 if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
     raise Exception("BOT_TOKEN, DATABASE_URL, API_ID, API_HASH are required")
 
+# ========== مسیر ffmpeg داخل پروژه ==========
+BASE_DIR = os.path.dirname(__file__)
+FFMPEG_PATH = os.path.join(BASE_DIR, "bin", "ffmpeg")
+FFPROBE_PATH = os.path.join(BASE_DIR, "bin", "ffprobe")
+if not os.path.exists(FFMPEG_PATH):
+    # fallback (در Render نباید این اتفاق بیفتد)
+    FFMPEG_PATH = "ffmpeg"
+    FFPROBE_PATH = "ffprobe"
+
+# ========== مراحل مکالمه ==========
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 
@@ -112,7 +123,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== ویدیو کال ==========
+# ========== توابع ویدیو کال ==========
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
@@ -144,7 +155,8 @@ async def answer_call(chat_id, call_client, video_path):
                 VideoStream(video_path)
             )
         )
-        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
+        # استفاده از ffprobe مسیر درست
+        result = subprocess.run([FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
         duration = float(result.stdout.strip())
         await asyncio.sleep(duration)
         await call_client.leave_call(chat_id)
@@ -174,14 +186,14 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع ==========
+# ========== تبدیل ویدیو به مربع (با ffmpeg در پوشه bin) ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
     except:
-        raise Exception("ffmpeg not found")
+        raise Exception("ffmpeg not found at " + FFMPEG_PATH)
     cmd = [
-        'ffmpeg', '-i', input_path,
+        FFMPEG_PATH, '-i', input_path,
         '-vf', f'crop=min(iw\\,ih):min(iw\\,ih),scale={target_size}:{target_size}',
         '-c:a', 'copy', '-y', output_path
     ]
@@ -669,7 +681,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- ویدیو کال ----------
+# ---------- تنظیم ویدیو کال ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
