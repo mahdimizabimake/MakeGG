@@ -44,7 +44,7 @@ API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CH
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 AUTO_VIDEO_STATE = 10
 
-# ========== Ø¯ÛŒØªØ§Ø¨ÛŒØ³ ==========
+# ========== دیتابیس ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -122,7 +122,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„ ==========
+# ========== ویدیو کال ==========
 call_clients = {}
 
 async def enable_auto_video(user_id, video_path):
@@ -182,7 +182,7 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     return call_client
 
 async def get_video_duration(video_path):
-    """Ú¯Ø±ÙØªÙ† Ù…Ø¯Øª Ø²Ù…Ø§Ù† ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ø§ ffprobe"""
+    """گرفتن مدت زمان ویدیو با ffprobe"""
     cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", video_path]
     process = await asyncio.create_subprocess_exec(
@@ -232,7 +232,7 @@ async def restore_auto_video_calls():
                             if vid_path and os.path.exists(vid_path):
                                 await answer_call(call.chat_id, call_clients[bound_user_id], vid_path)
 
-# ========== ØªØ¨Ø¯ÛŒÙ„ ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ù‡ Ù…Ø±Ø¨Ø¹ Ø¨Ø§ Ø§Ø³ØªÙØ§Ø¯Ù‡ Ø§Ø² asyncio.create_subprocess_exec ==========
+# ========== تبدیل ویدیو به مربع با استفاده از asyncio.create_subprocess_exec ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -273,7 +273,7 @@ async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
 
     return output_abs
 
-# ========== ØªÙˆØ§Ø¨Ø¹ Ú©Ù…Ú©ÛŒ Telethon ==========
+# ========== توابع کمکی Telethon ==========
 async def get_input_entity_safe(client, identifier):
     try:
         return await client.get_input_entity(identifier)
@@ -319,7 +319,7 @@ async def send_as_video_note(client, chat, file_path, duration, reply_to=None):
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        return None, "Ù„Ø§Ú¯ÛŒÙ† Ù†Ø´Ø¯Ù‡â€ŒØ§ÛŒØ¯"
+        return None, "لاگین نشده‌اید"
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
@@ -328,14 +328,14 @@ async def get_last_dialogs(user_id):
         result = [(d.id, d.title or d.name or (d.entity.first_name if d.entity else str(d.id))) for d in dialogs]
         return result, None
     except Exception as e:
-        return None, f"Ø®Ø·Ø§: {str(e)}"
+        return None, f"خطا: {str(e)}"
     finally:
         await client.disconnect()
 
 async def get_last_messages(user_id, chat_id, limit=10):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        return None, "Ù„Ø§Ú¯ÛŒÙ† Ù†Ø´Ø¯Ù‡â€ŒØ§ÛŒØ¯"
+        return None, "لاگین نشده‌اید"
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
     try:
@@ -355,12 +355,12 @@ async def get_last_messages(user_id, chat_id, limit=10):
             if isinstance(msg, Message):
                 text = msg.text or msg.message or ""
                 if not text:
-                    text = "ðŸ“· Ø±Ø³Ø§Ù†Ù‡" if msg.media else "Ù¾ÛŒØ§Ù… Ø®Ø§Ù„ÛŒ"
+                    text = "📷 رسانه" if msg.media else "پیام خالی"
                 short_text = text[:20] + "..." if len(text) > 20 else text
                 messages.append((msg.id, short_text))
         return messages, None
     except Exception as e:
-        return None, f"Ø®Ø·Ø§: {str(e)}"
+        return None, f"خطا: {str(e)}"
     finally:
         await client.disconnect()
 
@@ -377,36 +377,36 @@ async def parse_message_link(link):
         chat_id = chat_part
     return chat_id, msg_id
 
-# ========== Ù…Ù†ÙˆÛŒ Ø§ØµÙ„ÛŒ ==========
+# ========== منوی اصلی ==========
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = await get_user_data(user_id)
-    text = "ðŸŽ› **Ù¾Ù†Ù„ Ù…Ø¯ÛŒØ±ÛŒØª**\n\n"
+    text = "🎛 **پنل مدیریت**\n\n"
     if data and data['session_string']:
-        text += "âœ… Ù„Ø§Ú¯ÛŒÙ† Ù‡Ø³ØªÛŒØ¯\n"
+        text += "✅ لاگین هستید\n"
         if data['target_chat_id']:
-            text += f"ðŸŽ¯ Ú†Øª Ù‡Ø¯Ù: `{data['target_chat_title'] or data['target_chat_id']}`\n"
+            text += f"🎯 چت هدف: `{data['target_chat_title'] or data['target_chat_id']}`\n"
         else:
-            text += "âŒ Ú†Øª Ù‡Ø¯Ù ØªÙ†Ø¸ÛŒÙ… Ù†Ø´Ø¯Ù‡\n"
+            text += "❌ چت هدف تنظیم نشده\n"
         if data.get('reply_active') and data.get('reply_msg_id'):
-            text += f"ðŸ” Ø±ÛŒÙ¾Ù„ÛŒ ÙØ¹Ø§Ù„ Ø¨Ù‡ Ù¾ÛŒØ§Ù… ID `{data['reply_msg_id']}`\n"
+            text += f"🔁 ریپلی فعال به پیام ID `{data['reply_msg_id']}`\n"
         else:
-            text += "ðŸ” Ø±ÛŒÙ¾Ù„ÛŒ: ØºÛŒØ±ÙØ¹Ø§Ù„\n"
+            text += "🔁 ریپلی: غیرفعال\n"
         if data.get('auto_video_enabled') and data.get('auto_video_path'):
-            text += "ðŸ“¹ ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„: **ÙØ¹Ø§Ù„**\n"
+            text += "📹 ویدیو کال: **فعال**\n"
         else:
-            text += "ðŸ“¹ ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„: **ØºÛŒØ±ÙØ¹Ø§Ù„**\n"
+            text += "📹 ویدیو کال: **غیرفعال**\n"
     else:
-        text += "âŒ Ù„Ø§Ú¯ÛŒÙ† Ù†ÛŒØ³ØªÛŒØ¯\n"
+        text += "❌ لاگین نیستید\n"
     buttons = [
-        [InlineKeyboardButton("ðŸ” Ù„Ø§Ú¯ÛŒÙ†", callback_data="login")],
-        [InlineKeyboardButton("ðŸŽ¯ ØªÙ†Ø¸ÛŒÙ… Ú†Øª Ù‡Ø¯Ù", callback_data="set_target")],
-        [InlineKeyboardButton("ðŸ” ØªÙ†Ø¸ÛŒÙ… Ø±ÛŒÙ¾Ù„ÛŒ", callback_data="set_reply")],
-        [InlineKeyboardButton("âŒ Ù„ØºÙˆ Ø±ÛŒÙ¾Ù„ÛŒ", callback_data="clear_reply")],
-        [InlineKeyboardButton("ðŸ“¹ ØªÙ†Ø¸ÛŒÙ… ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„", callback_data="set_auto_video")],
-        [InlineKeyboardButton("ðŸš« Ù„ØºÙˆ ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„", callback_data="disable_auto_video")],
-        [InlineKeyboardButton("ðŸ“‹ ÙˆØ¶Ø¹ÛŒØª", callback_data="status")],
-        [InlineKeyboardButton("ðŸšª Ø®Ø±ÙˆØ¬", callback_data="logout")]
+        [InlineKeyboardButton("🔐 لاگین", callback_data="login")],
+        [InlineKeyboardButton("🎯 تنظیم چت هدف", callback_data="set_target")],
+        [InlineKeyboardButton("🔁 تنظیم ریپلی", callback_data="set_reply")],
+        [InlineKeyboardButton("❌ لغو ریپلی", callback_data="clear_reply")],
+        [InlineKeyboardButton("📹 تنظیم ویدیو کال", callback_data="set_auto_video")],
+        [InlineKeyboardButton("🚫 لغو ویدیو کال", callback_data="disable_auto_video")],
+        [InlineKeyboardButton("📋 وضعیت", callback_data="status")],
+        [InlineKeyboardButton("🚪 خروج", callback_data="logout")]
     ]
     markup = InlineKeyboardMarkup(buttons)
     if update.callback_query and update.callback_query.message:
@@ -414,24 +414,24 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=markup)
 
-# ---------- Ù„Ø§Ú¯ÛŒÙ† ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.edit_message_text("api_id Ø±Ø§ ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯:")
+    await update.callback_query.edit_message_text("api_id را وارد کنید:")
     return API_ID_STATE
 
 async def login_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         context.user_data['api_id'] = int(update.message.text.strip())
-        await update.message.reply_text("api_hash Ø±Ø§ ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯:")
+        await update.message.reply_text("api_hash را وارد کنید:")
         return API_HASH_STATE
     except ValueError:
-        await update.message.reply_text("api_id Ø¨Ø§ÛŒØ¯ Ø¹Ø¯Ø¯ Ø¨Ø§Ø´Ø¯. Ø¯ÙˆØ¨Ø§Ø±Ù‡:")
+        await update.message.reply_text("api_id باید عدد باشد. دوباره:")
         return API_ID_STATE
 
 async def login_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['api_hash'] = update.message.text.strip()
-    await update.message.reply_text("Ø´Ù…Ø§Ø±Ù‡ ØªÙ„ÙÙ† (Ø¨Ø§ Ú©Ø¯ Ú©Ø´ÙˆØ±):")
+    await update.message.reply_text("شماره تلفن (با کد کشور):")
     return PHONE_STATE
 
 async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,10 +442,10 @@ async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.send_code_request(phone)
         context.user_data['temp_client'] = client
-        await update.message.reply_text("Ú©Ø¯ ØªØ£ÛŒÛŒØ¯ +1 Ø±Ø§ ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯ (Ù…Ø«Ù„Ø§Ù‹ 12345->12346):")
+        await update.message.reply_text("کد تأیید +1 را وارد کنید (مثلاً 12345->12346):")
         return CODE_STATE
     except Exception as e:
-        await update.message.reply_text(f"Ø®Ø·Ø§: {e}")
+        await update.message.reply_text(f"خطا: {e}")
         return ConversationHandler.END
 
 async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -453,11 +453,11 @@ async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         real_code = int(update.message.text.strip()) - 1
         if real_code < 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("Ø¹Ø¯Ø¯ Ù…Ø¹ØªØ¨Ø± ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯:")
+        await update.message.reply_text("عدد معتبر وارد کنید:")
         return CODE_STATE
     client = context.user_data.get('temp_client')
     if not client:
-        await update.message.reply_text("Ù†Ø´Ø³Øª Ù…Ù†Ù‚Ø¶ÛŒ")
+        await update.message.reply_text("نشست منقضی")
         return ConversationHandler.END
     try:
         await client.sign_in(context.user_data['phone'], str(real_code))
@@ -467,21 +467,21 @@ async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_hash=context.user_data['api_hash'],
             session_string=session_string)
         await client.disconnect()
-        await update.message.reply_text("âœ… Ù„Ø§Ú¯ÛŒÙ† Ù…ÙˆÙÙ‚")
+        await update.message.reply_text("✅ لاگین موفق")
         await main_menu(update, context)
         return ConversationHandler.END
     except SessionPasswordNeededError:
-        await update.message.reply_text("Ø±Ù…Ø² Ø¯Ùˆ Ù…Ø±Ø­Ù„Ù‡â€ŒØ§ÛŒ Ø±Ø§ ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯:")
+        await update.message.reply_text("رمز دو مرحله‌ای را وارد کنید:")
         return PASSWORD_STATE
     except Exception as e:
-        await update.message.reply_text(f"Ø®Ø·Ø§: {e}")
+        await update.message.reply_text(f"خطا: {e}")
         return ConversationHandler.END
 
 async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pwd = update.message.text.strip()
     client = context.user_data.get('temp_client')
     if not client:
-        await update.message.reply_text("Ù†Ø´Ø³Øª Ù…Ù†Ù‚Ø¶ÛŒ")
+        await update.message.reply_text("نشست منقضی")
         return ConversationHandler.END
     try:
         await client.sign_in(password=pwd)
@@ -491,32 +491,32 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_hash=context.user_data['api_hash'],
             session_string=session_string)
         await client.disconnect()
-        await update.message.reply_text("âœ… Ù„Ø§Ú¯ÛŒÙ† Ù…ÙˆÙÙ‚")
+        await update.message.reply_text("✅ لاگین موفق")
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
-        await update.message.reply_text(f"Ø±Ù…Ø² Ø§Ø´ØªØ¨Ø§Ù‡: {e}")
+        await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- ØªÙ†Ø¸ÛŒÙ… Ú†Øª Ù‡Ø¯Ù ----------
+# ---------- تنظیم چت هدف ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ Ø¯Ø±ÛŒØ§ÙØª Ù„ÛŒØ³Øª Ú†Øªâ€ŒÙ‡Ø§ÛŒ Ø§Ø®ÛŒØ±...")
+    await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
     dialogs, error = await get_last_dialogs(query.from_user.id)
     if error:
-        await query.edit_message_text(f"âŒ {error}\n\nÙ„Ø·ÙØ§Ù‹ Ø§Ø² Ú¯Ø²ÛŒÙ†Ù‡ Â«ÙˆØ±ÙˆØ¯ Ø¯Ø³ØªÛŒÂ» Ø§Ø³ØªÙØ§Ø¯Ù‡ Ú©Ù†ÛŒØ¯.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âœï¸ ÙˆØ±ÙˆØ¯ Ø¯Ø³ØªÛŒ", callback_data="manual_input")], [InlineKeyboardButton("ðŸ”™ Ø¨Ø§Ø²Ú¯Ø´Øª Ø¨Ù‡ Ù…Ù†Ùˆ", callback_data="back_main")]]))
+        await query.edit_message_text(f"❌ {error}\n\nلطفاً از گزینه «ورود دستی» استفاده کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")], [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]]))
         return TARGET_CHAT_STATE
     if not dialogs:
-        await query.edit_message_text("âš ï¸ Ù‡ÛŒÚ† Ú†ØªÛŒ Ù¾ÛŒØ¯Ø§ Ù†Ø´Ø¯.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âœï¸ ÙˆØ±ÙˆØ¯ Ø¯Ø³ØªÛŒ", callback_data="manual_input")], [InlineKeyboardButton("ðŸ”™ Ø¨Ø§Ø²Ú¯Ø´Øª Ø¨Ù‡ Ù…Ù†Ùˆ", callback_data="back_main")]]))
+        await query.edit_message_text("⚠️ هیچ چتی پیدا نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")], [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main")]]))
         return TARGET_CHAT_STATE
     buttons = []
     for chat_id, title in dialogs:
         short_title = title[:40] + "..." if len(title) > 40 else title
-        buttons.append([InlineKeyboardButton(f"ðŸ“Œ {short_title}", callback_data=f"chat_{chat_id}")])
-    buttons.append([InlineKeyboardButton("âœï¸ ÙˆØ±ÙˆØ¯ Ø¯Ø³ØªÛŒ", callback_data="manual_input")])
-    buttons.append([InlineKeyboardButton("ðŸ”™ Ø¨Ø§Ø²Ú¯Ø´Øª", callback_data="back_main")])
-    await query.edit_message_text("ðŸŽ¯ Ø§Ù†ØªØ®Ø§Ø¨ Ú†Øª Ù‡Ø¯Ù:", reply_markup=InlineKeyboardMarkup(buttons))
+        buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"chat_{chat_id}")])
+    buttons.append([InlineKeyboardButton("✏️ ورود دستی", callback_data="manual_input")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")])
+    await query.edit_message_text("🎯 انتخاب چت هدف:", reply_markup=InlineKeyboardMarkup(buttons))
     return TARGET_CHAT_STATE
 
 async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,7 +525,7 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     user_id = query.from_user.id
     if data == "manual_input":
-        await query.edit_message_text("ÛŒÙˆØ²Ø±Ù†ÛŒÙ… ÛŒØ§ Ø¢ÛŒØ¯ÛŒ Ø¹Ø¯Ø¯ÛŒ Ú†Øª Ø±Ø§ ÙˆØ§Ø±Ø¯ Ú©Ù†ÛŒØ¯:\n(Ø¨Ø±Ø§ÛŒ Ù„ØºÙˆ /cancel)")
+        await query.edit_message_text("یوزرنیم یا آیدی عددی چت را وارد کنید:\n(برای لغو /cancel)")
         return TARGET_CHAT_STATE
     elif data == "back_main":
         await main_menu(update, context)
@@ -535,7 +535,7 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
             chat_id = int(data.split("_")[1])
             user_data = await get_user_data(user_id)
             if not user_data or not user_data['session_string']:
-                await query.edit_message_text("âŒ Ù†Ø´Ø³Øª Ù…Ø¹ØªØ¨Ø± Ù†ÛŒØ³Øª. Ù„Ø·ÙØ§Ù‹ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+                await query.edit_message_text("❌ نشست معتبر نیست. لطفاً لاگین کنید.")
                 return ConversationHandler.END
             client = TelegramClient(StringSession(user_data['session_string']), user_data['api_id'], user_data['api_hash'])
             await client.connect()
@@ -545,14 +545,14 @@ async def set_target_chat_button(update: Update, context: ContextTypes.DEFAULT_T
             finally:
                 await client.disconnect()
             await update_target_chat(user_id, chat_id, chat_title)
-            await query.edit_message_text(f"âœ… Ú†Øª Ù‡Ø¯Ù ØªÙ†Ø¸ÛŒÙ… Ø´Ø¯: `{chat_title}`")
+            await query.edit_message_text(f"✅ چت هدف تنظیم شد: `{chat_title}`")
             await asyncio.sleep(1)
             await main_menu(update, context)
             return ConversationHandler.END
         except Exception as e:
-            await query.edit_message_text(f"âŒ Ø®Ø·Ø§: {str(e)}")
+            await query.edit_message_text(f"❌ خطا: {str(e)}")
             return ConversationHandler.END
-    await query.edit_message_text("âŒ Ø¯Ø³ØªÙˆØ± Ù†Ø§Ù…Ø¹ØªØ¨Ø±.")
+    await query.edit_message_text("❌ دستور نامعتبر.")
     return ConversationHandler.END
 
 async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -560,7 +560,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_input = update.message.text.strip()
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        await update.message.reply_text("âŒ Ø§Ø¨ØªØ¯Ø§ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+        await update.message.reply_text("❌ ابتدا لاگین کنید.")
         return ConversationHandler.END
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
@@ -573,28 +573,28 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entity = await get_entity_safe(client, chat_input)
         chat_title = getattr(entity, 'title', None) or entity.first_name or str(entity.id)
         await update_target_chat(user_id, entity.id, chat_title)
-        await update.message.reply_text(f"âœ… Ú†Øª Ù‡Ø¯Ù ØªÙ†Ø¸ÛŒÙ… Ø´Ø¯: `{chat_title}`")
+        await update.message.reply_text(f"✅ چت هدف تنظیم شد: `{chat_title}`")
     except Exception as e:
-        await update.message.reply_text(f"âŒ Ø®Ø·Ø§: {str(e)}\n\nÙ†Ú©ØªÙ‡: Ø§Ú¯Ø± Ø§Ø² Ø¢ÛŒØ¯ÛŒ Ø¹Ø¯Ø¯ÛŒ Ø§Ø³ØªÙØ§Ø¯Ù‡ Ù…ÛŒâ€ŒÚ©Ù†ÛŒØ¯ØŒ Ù…Ø·Ù…Ø¦Ù† Ø´ÙˆÛŒØ¯ Ù‚Ø¨Ù„Ø§Ù‹ Ø¨Ø§ Ø¢Ù† Ú©Ø§Ø±Ø¨Ø± Ú†Øª Ø¯Ø§Ø´ØªÙ‡â€ŒØ§ÛŒØ¯.")
+        await update.message.reply_text(f"❌ خطا: {str(e)}\n\nنکته: اگر از آیدی عددی استفاده می‌کنید، مطمئن شوید قبلاً با آن کاربر چت داشته‌اید.")
     finally:
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- ØªÙ†Ø¸ÛŒÙ… Ø±ÛŒÙ¾Ù„ÛŒ ----------
+# ---------- تنظیم ریپلی ----------
 async def set_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        await query.edit_message_text("âŒ Ø§Ø¨ØªØ¯Ø§ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+        await query.edit_message_text("❌ ابتدا لاگین کنید.")
         return ConversationHandler.END
     buttons = [
-        [InlineKeyboardButton("ðŸ”— Ø¨Ø§ Ù„ÛŒÙ†Ú© Ù¾ÛŒØ§Ù…", callback_data="reply_link")],
-        [InlineKeyboardButton("ðŸ“‹ Ø§Ù†ØªØ®Ø§Ø¨ Ø§Ø² Ú†Øªâ€ŒÙ‡Ø§", callback_data="reply_from_chat")],
-        [InlineKeyboardButton("ðŸ”™ Ø§Ù†ØµØ±Ø§Ù", callback_data="back_main")]
+        [InlineKeyboardButton("🔗 با لینک پیام", callback_data="reply_link")],
+        [InlineKeyboardButton("📋 انتخاب از چت‌ها", callback_data="reply_from_chat")],
+        [InlineKeyboardButton("🔙 انصراف", callback_data="back_main")]
     ]
-    await query.edit_message_text("ðŸ” **ØªÙ†Ø¸ÛŒÙ… Ø±ÛŒÙ¾Ù„ÛŒ ÛŒÚ©Ø¨Ø§Ø± Ù…ØµØ±Ù**\n\nÙ„Ø·ÙØ§Ù‹ Ø±ÙˆØ´ Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+    await query.edit_message_text("🔁 **تنظیم ریپلی یکبار مصرف**\n\nلطفاً روش را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
     return REPLY_METHOD_STATE
 
 async def reply_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -606,26 +606,26 @@ async def reply_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         await main_menu(update, context)
         return ConversationHandler.END
     elif data == "reply_link":
-        await query.edit_message_text("Ù„Ø·ÙØ§Ù‹ Ù„ÛŒÙ†Ú© Ù¾ÛŒØ§Ù… Ù…ÙˆØ±Ø¯ Ù†Ø¸Ø± Ø±Ø§ Ø§Ø±Ø³Ø§Ù„ Ú©Ù†ÛŒØ¯:\n(Ù…Ø«Ø§Ù„: https://t.me/username/123 ÛŒØ§ https://t.me/c/123456789/100)\nØ¨Ø±Ø§ÛŒ Ù„ØºÙˆ /cancel")
+        await query.edit_message_text("لطفاً لینک پیام مورد نظر را ارسال کنید:\n(مثال: https://t.me/username/123 یا https://t.me/c/123456789/100)\nبرای لغو /cancel")
         return REPLY_LINK_STATE
     elif data == "reply_from_chat":
-        await query.edit_message_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ Ø¯Ø±ÛŒØ§ÙØª Ù„ÛŒØ³Øª Ú†Øªâ€ŒÙ‡Ø§ÛŒ Ø§Ø®ÛŒØ±...")
+        await query.edit_message_text("🔄 در حال دریافت لیست چت‌های اخیر...")
         dialogs, error = await get_last_dialogs(user_id)
         if error:
-            await query.edit_message_text(f"âŒ {error}")
+            await query.edit_message_text(f"❌ {error}")
             return ConversationHandler.END
         if not dialogs:
-            await query.edit_message_text("âš ï¸ Ù‡ÛŒÚ† Ú†ØªÛŒ Ù¾ÛŒØ¯Ø§ Ù†Ø´Ø¯.")
+            await query.edit_message_text("⚠️ هیچ چتی پیدا نشد.")
             return ConversationHandler.END
         buttons = []
         for chat_id, title in dialogs:
             short_title = title[:40] + "..." if len(title) > 40 else title
-            buttons.append([InlineKeyboardButton(f"ðŸ“Œ {short_title}", callback_data=f"reply_chat_{chat_id}")])
-        buttons.append([InlineKeyboardButton("ðŸ”™ Ø§Ù†ØµØ±Ø§Ù", callback_data="back_main")])
-        await query.edit_message_text("ðŸ” Ù…Ø±Ø­Ù„Ù‡ 1: Ú†Øª Ù…ÙˆØ±Ø¯ Ù†Ø¸Ø± Ø¨Ø±Ø§ÛŒ Ø±ÛŒÙ¾Ù„ÛŒ Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯:", reply_markup=InlineKeyboardMarkup(buttons))
+            buttons.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"reply_chat_{chat_id}")])
+        buttons.append([InlineKeyboardButton("🔙 انصراف", callback_data="back_main")])
+        await query.edit_message_text("🔁 مرحله 1: چت مورد نظر برای ریپلی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
         return REPLY_SELECT_CHAT_STATE
     else:
-        await query.edit_message_text("âŒ Ú¯Ø²ÛŒÙ†Ù‡ Ù†Ø§Ù…Ø¹ØªØ¨Ø±.")
+        await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
 async def reply_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -633,11 +633,11 @@ async def reply_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     link = update.message.text.strip()
     chat_id, msg_id = await parse_message_link(link)
     if not chat_id or not msg_id:
-        await update.message.reply_text("âŒ Ù„ÛŒÙ†Ú© Ù…Ø¹ØªØ¨Ø± Ù†ÛŒØ³Øª. Ù„Ø·ÙØ§Ù‹ Ù„ÛŒÙ†Ú© Ù¾ÛŒØ§Ù… ØªÙ„Ú¯Ø±Ø§Ù… Ø±Ø§ Ø¨ÙØ±Ø³ØªÛŒØ¯.")
+        await update.message.reply_text("❌ لینک معتبر نیست. لطفاً لینک پیام تلگرام را بفرستید.")
         return REPLY_LINK_STATE
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        await update.message.reply_text("âŒ Ø§Ø¨ØªØ¯Ø§ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+        await update.message.reply_text("❌ ابتدا لاگین کنید.")
         return ConversationHandler.END
     client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
     await client.connect()
@@ -646,11 +646,11 @@ async def reply_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             entity = await get_entity_safe(client, chat_id)
             chat_id = entity.id
         await set_reply(user_id, chat_id, msg_id, active=True)
-        await update.message.reply_text(f"âœ… Ø±ÛŒÙ¾Ù„ÛŒ Ø¨Ø§ Ù…ÙˆÙÙ‚ÛŒØª ØªÙ†Ø¸ÛŒÙ… Ø´Ø¯.\nÚ†Øª: `{chat_id}`\nÙ¾ÛŒØ§Ù… ID: `{msg_id}`\n\nØ§Ú©Ù†ÙˆÙ† ÛŒÚ© ÙØ§ÛŒÙ„ ØµÙˆØªÛŒ ÛŒØ§ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ø¨ÙØ±Ø³ØªÛŒØ¯ ØªØ§ Ø¨Ù‡ Ø¹Ù†ÙˆØ§Ù† Ø±ÛŒÙ¾Ù„ÛŒ Ø¨Ù‡ Ø¢Ù† Ù¾ÛŒØ§Ù… Ø§Ø±Ø³Ø§Ù„ Ø´ÙˆØ¯ (ÙÙ‚Ø· ÛŒÚ©Ø¨Ø§Ø±).")
+        await update.message.reply_text(f"✅ ریپلی با موفقیت تنظیم شد.\nچت: `{chat_id}`\nپیام ID: `{msg_id}`\n\nاکنون یک فایل صوتی یا ویدیویی بفرستید تا به عنوان ریپلی به آن پیام ارسال شود (فقط یکبار).")
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
-        await update.message.reply_text(f"âŒ Ø®Ø·Ø§: {str(e)}")
+        await update.message.reply_text(f"❌ خطا: {str(e)}")
         return ConversationHandler.END
     finally:
         await client.disconnect()
@@ -666,22 +666,22 @@ async def reply_select_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("reply_chat_"):
         chat_id = int(data.split("_")[2])
         context.user_data['reply_chat_id'] = chat_id
-        await query.edit_message_text(f"ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ Ø¯Ø±ÛŒØ§ÙØª Ù¾ÛŒØ§Ù…â€ŒÙ‡Ø§ÛŒ Ú†Øª...")
+        await query.edit_message_text(f"🔄 در حال دریافت پیام‌های چت...")
         messages, error = await get_last_messages(user_id, chat_id, limit=10)
         if error:
-            await query.edit_message_text(f"âŒ {error}")
+            await query.edit_message_text(f"❌ {error}")
             return ConversationHandler.END
         if not messages:
-            await query.edit_message_text("âš ï¸ Ù‡ÛŒÚ† Ù¾ÛŒØ§Ù…ÛŒ Ø¯Ø± Ø§ÛŒÙ† Ú†Øª ÛŒØ§ÙØª Ù†Ø´Ø¯.")
+            await query.edit_message_text("⚠️ هیچ پیامی در این چت یافت نشد.")
             return ConversationHandler.END
         buttons = []
         for msg_id, short_text in messages:
-            buttons.append([InlineKeyboardButton(f"ðŸ“ {short_text}", callback_data=f"reply_msg_{msg_id}")])
-        buttons.append([InlineKeyboardButton("ðŸ”™ Ø§Ù†ØµØ±Ø§Ù", callback_data="back_main")])
-        await query.edit_message_text(f"ðŸ” Ù…Ø±Ø­Ù„Ù‡ 2: Ù¾ÛŒØ§Ù… Ù…ÙˆØ±Ø¯ Ù†Ø¸Ø± Ø¨Ø±Ø§ÛŒ Ø±ÛŒÙ¾Ù„ÛŒ Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯:", reply_markup=InlineKeyboardMarkup(buttons))
+            buttons.append([InlineKeyboardButton(f"📝 {short_text}", callback_data=f"reply_msg_{msg_id}")])
+        buttons.append([InlineKeyboardButton("🔙 انصراف", callback_data="back_main")])
+        await query.edit_message_text(f"🔁 مرحله 2: پیام مورد نظر برای ریپلی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
         return REPLY_SELECT_MSG_STATE
     else:
-        await query.edit_message_text("âŒ Ú¯Ø²ÛŒÙ†Ù‡ Ù†Ø§Ù…Ø¹ØªØ¨Ø±.")
+        await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
 async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -696,26 +696,26 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_id = int(data.split("_")[2])
         chat_id = context.user_data.get('reply_chat_id')
         if not chat_id:
-            await query.edit_message_text("âŒ Ø®Ø·Ø§: Ú†Øª Ø§Ù†ØªØ®Ø§Ø¨ Ù†Ø´Ø¯Ù‡.")
+            await query.edit_message_text("❌ خطا: چت انتخاب نشده.")
             return ConversationHandler.END
         await set_reply(user_id, chat_id, msg_id, active=True)
-        await query.edit_message_text(f"âœ… Ø±ÛŒÙ¾Ù„ÛŒ Ø¨Ø§ Ù…ÙˆÙÙ‚ÛŒØª ØªÙ†Ø¸ÛŒÙ… Ø´Ø¯.\nÚ†Øª: `{chat_id}`\nÙ¾ÛŒØ§Ù… ID: `{msg_id}`\n\nØ§Ú©Ù†ÙˆÙ† ÛŒÚ© ÙØ§ÛŒÙ„ ØµÙˆØªÛŒ ÛŒØ§ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ø¨ÙØ±Ø³ØªÛŒØ¯ ØªØ§ Ø¨Ù‡ Ø¹Ù†ÙˆØ§Ù† Ø±ÛŒÙ¾Ù„ÛŒ Ø¨Ù‡ Ø¢Ù† Ù¾ÛŒØ§Ù… Ø§Ø±Ø³Ø§Ù„ Ø´ÙˆØ¯ (ÙÙ‚Ø· ÛŒÚ©Ø¨Ø§Ø±).")
+        await query.edit_message_text(f"✅ ریپلی با موفقیت تنظیم شد.\nچت: `{chat_id}`\nپیام ID: `{msg_id}`\n\nاکنون یک فایل صوتی یا ویدیویی بفرستید تا به عنوان ریپلی به آن پیام ارسال شود (فقط یکبار).")
         await asyncio.sleep(2)
         await main_menu(update, context)
         return ConversationHandler.END
     else:
-        await query.edit_message_text("âŒ Ú¯Ø²ÛŒÙ†Ù‡ Ù†Ø§Ù…Ø¹ØªØ¨Ø±.")
+        await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
-# ---------- ÙˆØ¶Ø¹ÛŒØª Ùˆ Ø®Ø±ÙˆØ¬ ----------
+# ---------- وضعیت و خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = await get_user_data(query.from_user.id)
     if not data or not data['session_string']:
-        text = "âŒ Ù„Ø§Ú¯ÛŒÙ† Ù†ÛŒØ³ØªÛŒØ¯"
+        text = "❌ لاگین نیستید"
     else:
-        text = f"âœ… Ù„Ø§Ú¯ÛŒÙ† Ù‡Ø³ØªÛŒØ¯\nðŸŽ¯ Ú†Øª Ù‡Ø¯Ù: `{data['target_chat_title'] or data['target_chat_id'] if data['target_chat_id'] else 'ØªÙ†Ø¸ÛŒÙ… Ù†Ø´Ø¯Ù‡'}`\nðŸ” Ø±ÛŒÙ¾Ù„ÛŒ: {'ÙØ¹Ø§Ù„' if data['reply_active'] else 'ØºÛŒØ±ÙØ¹Ø§Ù„'}\nðŸ“¹ ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„: {'ÙØ¹Ø§Ù„' if data.get('auto_video_enabled') else 'ØºÛŒØ±ÙØ¹Ø§Ù„'}"
+        text = f"✅ لاگین هستید\n🎯 چت هدف: `{data['target_chat_title'] or data['target_chat_id'] if data['target_chat_id'] else 'تنظیم نشده'}`\n🔁 ریپلی: {'فعال' if data['reply_active'] else 'غیرفعال'}\n📹 ویدیو کال: {'فعال' if data.get('auto_video_enabled') else 'غیرفعال'}"
     await query.edit_message_text(text, parse_mode='Markdown')
 
 async def clear_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,7 +723,7 @@ async def clear_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     user_id = query.from_user.id
     await clear_reply(user_id)
-    await query.edit_message_text("âœ… Ø±ÛŒÙ¾Ù„ÛŒ ØºÛŒØ±ÙØ¹Ø§Ù„ Ø´Ø¯.")
+    await query.edit_message_text("✅ ریپلی غیرفعال شد.")
     await asyncio.sleep(1)
     await main_menu(update, context)
 
@@ -738,7 +738,7 @@ async def disable_auto_video_callback(update: Update, context: ContextTypes.DEFA
             del call_clients[user_id]
         except:
             pass
-    await query.edit_message_text("âœ… Ù‚Ø§Ø¨Ù„ÛŒØª ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„ ØºÛŒØ±ÙØ¹Ø§Ù„ Ø´Ø¯.")
+    await query.edit_message_text("✅ قابلیت ویدیو کال غیرفعال شد.")
     await asyncio.sleep(1)
     await main_menu(update, context)
 
@@ -753,51 +753,51 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del call_clients[user_id]
         except:
             pass
-    await query.edit_message_text("âœ… Ø§Ø² Ø§Ú©Ø§Ù†Øª Ø®Ø§Ø±Ø¬ Ø´Ø¯ÛŒØ¯.")
+    await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- ØªÙ†Ø¸ÛŒÙ… ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„ ----------
+# ---------- تنظیم ویدیو کال ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
-        await query.edit_message_text("âŒ Ø§Ø¨ØªØ¯Ø§ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+        await query.edit_message_text("❌ ابتدا لاگین کنید.")
         return ConversationHandler.END
-    await query.edit_message_text("ðŸ“¹ Ù„Ø·ÙØ§Ù‹ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ú©Ù‡ Ù…ÛŒâ€ŒØ®ÙˆØ§Ù‡ÛŒØ¯ Ø¯Ø± ØªÙ…Ø§Ø³â€ŒÙ‡Ø§ÛŒ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ù¾Ø®Ø´ Ø´ÙˆØ¯ Ø±Ø§ Ø§Ø±Ø³Ø§Ù„ Ú©Ù†ÛŒØ¯.\nÙˆÛŒØ¯ÛŒÙˆ Ø¨Ø§ÛŒØ¯ Ú©ÙˆØªØ§Ù‡ Ø¨Ø§Ø´Ø¯ (Ø­Ø¯Ø§Ú©Ø«Ø± 60 Ø«Ø§Ù†ÛŒÙ‡).\nØ¨Ø±Ø§ÛŒ Ù„ØºÙˆ /cancel")
+    await query.edit_message_text("📹 لطفاً ویدیویی که می‌خواهید در تماس‌های ویدیویی پخش شود را ارسال کنید.\nویدیو باید کوتاه باشد (حداکثر 60 ثانیه).\nبرای لغو /cancel")
     return AUTO_VIDEO_STATE
 
 async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    status_msg = await update.message.reply_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ Ù¾Ø±Ø¯Ø§Ø²Ø´ ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ø±Ø§ÛŒ ÙˆÛŒØ¯ÛŒÙˆ Ú©Ø§Ù„...")
+    status_msg = await update.message.reply_text("🔄 در حال پردازش ویدیو برای ویدیو کال...")
     try:
         data = await get_user_data(user_id)
         if not data or not data['session_string']:
-            await status_msg.edit_text("âŒ Ù„Ø§Ú¯ÛŒÙ† Ù†ÛŒØ³ØªÛŒØ¯.")
+            await status_msg.edit_text("❌ لاگین نیستید.")
             return ConversationHandler.END
         if not update.message.video:
-            await status_msg.edit_text("âŒ Ù„Ø·ÙØ§Ù‹ ÛŒÚ© ÙØ§ÛŒÙ„ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ø§Ø±Ø³Ø§Ù„ Ú©Ù†ÛŒØ¯.")
+            await status_msg.edit_text("❌ لطفاً یک فایل ویدیویی ارسال کنید.")
             return AUTO_VIDEO_STATE
         duration = getattr(update.message.video, 'duration', 0)
         if duration > 60:
-            await status_msg.edit_text("âŒ ÙˆÛŒØ¯ÛŒÙˆ Ù†Ø¨Ø§ÛŒØ¯ Ø¨ÛŒØ´ØªØ± Ø§Ø² 60 Ø«Ø§Ù†ÛŒÙ‡ Ø¨Ø§Ø´Ø¯.")
+            await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        await status_msg.edit_text("ðŸ“¥ Ø¯Ø± Ø­Ø§Ù„ Ø¯Ø§Ù†Ù„ÙˆØ¯ ÙˆÛŒØ¯ÛŒÙˆ...")
+        await status_msg.edit_text("📥 در حال دانلود ویدیو...")
         file = await update.message.video.get_file()
         file_path = str(await file.download_to_drive())
         if not os.path.exists(file_path):
-            await status_msg.edit_text("âŒ Ø®Ø·Ø§ Ø¯Ø± Ø¯Ø§Ù†Ù„ÙˆØ¯ ÙØ§ÛŒÙ„.")
+            await status_msg.edit_text("❌ خطا در دانلود فایل.")
             return AUTO_VIDEO_STATE
 
-        await status_msg.edit_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ ØªØ¨Ø¯ÛŒÙ„ ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ù‡ Ù…Ø±Ø¨Ø¹ (Ø¨Ø¯ÙˆÙ† Ø­Ø§Ø´ÛŒÙ‡)...")
+        await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
         try:
             final_file_path = await convert_to_square_ffmpeg(file_path, square_path)
         except Exception as e:
             error_detail = str(e)
-            print(f"ffmpeg error detail: {error_detail}")  # Ù„Ø§Ú¯ Ø¯Ø± Ø±Ù†Ø¯Ø±
-            await status_msg.edit_text(f"âš ï¸ Ø®Ø·Ø§ Ø¯Ø± ØªØ¨Ø¯ÛŒÙ„: {error_detail[:200]}\nØ§Ø³ØªÙØ§Ø¯Ù‡ Ø§Ø² ÙˆÛŒØ¯ÛŒÙˆÛŒ Ø§ØµÙ„ÛŒ...")
+            print(f"ffmpeg error detail: {error_detail}")  # لاگ در رندر
+            await status_msg.edit_text(f"⚠️ خطا در تبدیل: {error_detail[:200]}\nاستفاده از ویدیوی اصلی...")
             final_file_path = file_path
 
         await enable_auto_video(user_id, final_file_path)
@@ -813,32 +813,32 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
                     if vid_path and os.path.exists(vid_path):
                         await answer_call(call.chat_id, call_clients[bound_user_id], vid_path)
 
-        await status_msg.edit_text("âœ… ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ø§ Ù…ÙˆÙÙ‚ÛŒØª ØªÙ†Ø¸ÛŒÙ… Ø´Ø¯.\nØ§Ø² Ø§ÛŒÙ† Ø¨Ù‡ Ø¨Ø¹Ø¯ Ù‡Ø± ØªÙ…Ø§Ø³ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ø¨Ù‡ Ø´Ù…Ø§ØŒ Ø¨Ø§ Ø§ÛŒÙ† ÙˆÛŒØ¯ÛŒÙˆ Ù¾Ø§Ø³Ø® Ø¯Ø§Ø¯Ù‡ Ù…ÛŒâ€ŒØ´ÙˆØ¯.")
+        await status_msg.edit_text("✅ ویدیو با موفقیت تنظیم شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود.")
         if os.path.exists(file_path) and file_path != final_file_path:
             os.remove(file_path)
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
         error_full = str(e)
-        print(f"Full error in handle_auto_video_file: {error_full}")  # Ù„Ø§Ú¯ Ø¯Ø± Ø±Ù†Ø¯Ø±
-        await status_msg.edit_text(f"âŒ Ø®Ø·Ø§: {error_full[:300]}")
+        print(f"Full error in handle_auto_video_file: {error_full}")  # لاگ در رندر
+        await status_msg.edit_text(f"❌ خطا: {error_full[:300]}")
         return AUTO_VIDEO_STATE
 
-# ---------- Ù‡Ù†Ø¯Ù„Ø± ÙØ§ÛŒÙ„ Ø¹Ù…ÙˆÙ…ÛŒ ----------
+# ---------- هندلر فایل عمومی ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    status_msg = await update.message.reply_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ Ù¾Ø±Ø¯Ø§Ø²Ø´...")
+    status_msg = await update.message.reply_text("🔄 در حال پردازش...")
     try:
         data = await get_user_data(user_id)
         if not data or not data['session_string']:
-            await status_msg.edit_text("âŒ Ù„Ø§Ú¯ÛŒÙ† Ù†ÛŒØ³ØªÛŒØ¯. Ø§Ø² Ù…Ù†Ùˆ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+            await status_msg.edit_text("❌ لاگین نیستید. از منو لاگین کنید.")
             return
         if data['reply_active'] and data['reply_chat_id'] and data['reply_msg_id']:
             target_chat_id = data['reply_chat_id']
             reply_to = data['reply_msg_id']
         else:
             if not data['target_chat_id']:
-                await status_msg.edit_text("âŒ Ú†Øª Ù‡Ø¯Ù ØªÙ†Ø¸ÛŒÙ… Ù†Ø´Ø¯Ù‡ Ùˆ Ø±ÛŒÙ¾Ù„ÛŒ ÙØ¹Ø§Ù„ÛŒ Ù‡Ù… Ù†Ø¯Ø§Ø±ÛŒØ¯.")
+                await status_msg.edit_text("❌ چت هدف تنظیم نشده و ریپلی فعالی هم ندارید.")
                 return
             target_chat_id = data['target_chat_id']
             reply_to = None
@@ -846,7 +846,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_audio = bool(msg.audio or msg.voice)
         is_video = bool(msg.video or msg.video_note)
         if not is_audio and not is_video:
-            await status_msg.edit_text("âŒ ÙÙ‚Ø· ÙØ§ÛŒÙ„ ØµÙˆØªÛŒ ÛŒØ§ ÙˆÛŒØ¯ÛŒÙˆÛŒÛŒ Ù¾Ø´ØªÛŒØ¨Ø§Ù†ÛŒ Ù…ÛŒâ€ŒØ´ÙˆØ¯.")
+            await status_msg.edit_text("❌ فقط فایل صوتی یا ویدیویی پشتیبانی می‌شود.")
             return
         duration = 3
         if is_audio:
@@ -855,7 +855,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duration = getattr(msg.video or msg.video_note, 'duration', 3)
         if not duration or duration <= 0:
             duration = 3
-        await status_msg.edit_text("ðŸ“¥ Ø¯Ø± Ø­Ø§Ù„ Ø¯Ø§Ù†Ù„ÙˆØ¯ ÙØ§ÛŒÙ„...")
+        await status_msg.edit_text("📥 در حال دانلود فایل...")
         if is_audio:
             file = await (msg.audio or msg.voice).get_file()
         else:
@@ -863,48 +863,48 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = str(await file.download_to_drive())
         final_file_path = file_path
         if is_video:
-            await status_msg.edit_text("ðŸ”„ Ø¯Ø± Ø­Ø§Ù„ ØªØ¨Ø¯ÛŒÙ„ ÙˆÛŒØ¯ÛŒÙˆ Ø¨Ù‡ Ù…Ø±Ø¨Ø¹ (Ø¨Ø¯ÙˆÙ† Ø­Ø§Ø´ÛŒÙ‡)...")
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
             square_path = file_path + "_square.mp4"
             try:
                 final_file_path = await convert_to_square_ffmpeg(file_path, square_path)
             except Exception as e:
-                await status_msg.edit_text(f"âš ï¸ Ø®Ø·Ø§ Ø¯Ø± ØªØ¨Ø¯ÛŒÙ„: {str(e)[:200]}. Ø§Ø±Ø³Ø§Ù„ ÙˆÛŒØ¯ÛŒÙˆÛŒ Ø§ØµÙ„ÛŒ...")
+                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)[:200]}. ارسال ویدیوی اصلی...")
                 final_file_path = file_path
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         if not await ensure_session_active(client):
-            await status_msg.edit_text("âŒ Ù†Ø´Ø³Øª Ù…Ù†Ù‚Ø¶ÛŒ Ø´Ø¯Ù‡. Ù„Ø·ÙØ§Ù‹ Ø¯ÙˆØ¨Ø§Ø±Ù‡ Ù„Ø§Ú¯ÛŒÙ† Ú©Ù†ÛŒØ¯.")
+            await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return
         target_entity = await get_input_entity_safe(client, target_chat_id)
-        await status_msg.edit_text(f"ðŸŽ¬ {'Ø¯Ø± Ø­Ø§Ù„ Ø§Ø±Ø³Ø§Ù„ ÙˆÛŒØ³' if is_audio else 'Ø¯Ø± Ø­Ø§Ù„ Ø§Ø±Ø³Ø§Ù„ ÙˆÛŒØ¯ÛŒÙˆ (Ø¯Ø§ÛŒØ±Ù‡â€ŒØ§ÛŒ)'}...")
+        await status_msg.edit_text(f"🎬 {'در حال ارسال ویس' if is_audio else 'در حال ارسال ویدیو (دایره‌ای)'}...")
         if is_audio:
             await send_as_voice_note(client, target_entity, final_file_path, duration, reply_to=reply_to)
         else:
             await send_as_video_note(client, target_entity, final_file_path, duration, reply_to=reply_to)
         if reply_to:
-            await status_msg.edit_text(f"âœ… {'ÙˆÛŒØ³' if is_audio else 'ÙˆÛŒØ¯ÛŒÙˆ'} Ù†ÙˆØª Ø¨Ù‡ Ø¹Ù†ÙˆØ§Ù† Ø±ÛŒÙ¾Ù„ÛŒ Ø§Ø±Ø³Ø§Ù„ Ø´Ø¯.")
+            await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت به عنوان ریپلی ارسال شد.")
             await clear_reply(user_id)
         else:
-            await status_msg.edit_text(f"âœ… {'ÙˆÛŒØ³' if is_audio else 'ÙˆÛŒØ¯ÛŒÙˆ'} Ù†ÙˆØª Ø§Ø±Ø³Ø§Ù„ Ø´Ø¯.")
+            await status_msg.edit_text(f"✅ {'ویس' if is_audio else 'ویدیو'} نوت ارسال شد.")
         await client.disconnect()
         if os.path.exists(file_path):
             os.remove(file_path)
         if is_video and os.path.exists(final_file_path) and final_file_path != file_path:
             os.remove(final_file_path)
     except FloodWaitError as e:
-        await status_msg.edit_text(f"â³ Ù…Ø­Ø¯ÙˆØ¯ÛŒØª ØªÙ„Ú¯Ø±Ø§Ù…: {e.seconds} Ø«Ø§Ù†ÛŒÙ‡ ØµØ¨Ø± Ú©Ù†ÛŒØ¯")
+        await status_msg.edit_text(f"⏳ محدودیت تلگرام: {e.seconds} ثانیه صبر کنید")
     except Exception as e:
-        await status_msg.edit_text(f"âŒ Ø®Ø·Ø§: {str(e)}")
+        await status_msg.edit_text(f"❌ خطا: {str(e)}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ù„ØºÙˆ Ø´Ø¯.")
+    await update.message.reply_text("لغو شد.")
     return ConversationHandler.END
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ========== ÙˆØ¨ Ø³Ø±ÙˆØ± ==========
+# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
