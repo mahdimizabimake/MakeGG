@@ -677,7 +677,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- تنظیم ویدیو کال (اصلاح شده) ----------
+# ---------- تنظیم ویدیو کال (دانلود مستقیم با file_id) ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -705,24 +705,17 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        # دانلود فقط با Telethon (اجتناب از خطای unpack)
-        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
+        file_id = update.message.video.file_id
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         if not await ensure_session_active(client):
             await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
             await client.disconnect()
             return ConversationHandler.END
-        
-        # دریافت message_id و chat_id (چت خصوصی با ربات)
-        msg_id = update.message.message_id
-        chat_id = update.effective_chat.id
-        tele_msg = await client.get_messages(chat_id, ids=msg_id)
-        if not tele_msg or not tele_msg.media:
-            await status_msg.edit_text("❌ پیام یا رسانه یافت نشد.")
-            await client.disconnect()
-            return AUTO_VIDEO_STATE
-        file_path = await tele_msg.download_media()
+
+        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
+        # دانلود مستقیم با file_id
+        file_path = await client.download_media(file_id)
         await client.disconnect()
         if not file_path or not os.path.exists(file_path):
             await status_msg.edit_text("❌ خطا در دانلود فایل.")
