@@ -3,4 +3,4 @@ telethon==1.34.0
 psycopg[binary]
 aiohttp>=3.9.3,<4.0.0
 Pyrogram==2.0.106
-git+https://github.com/pytgcalls/pytgcalls@master
+pytgcalls==2.3.0
