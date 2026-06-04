@@ -9,6 +9,10 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
 
   - type: worker
     name: video-call-handler
@@ -19,4 +23,8 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
         sync: false
