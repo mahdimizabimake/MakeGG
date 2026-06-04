@@ -22,6 +22,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
 from pytgcalls import PyTgCalls
 from pytgcalls.types import Update as CallUpdate
+from pytgcalls.types import Call
 from pytgcalls.types.input_stream import AudioStream, VideoStream, InputStream
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -32,7 +33,7 @@ if not BOT_TOKEN or not DATABASE_URL:
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 
-# ========== دیتابیس با ستون‌های جدید ==========
+# ========== دیتابیس ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -110,7 +111,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== توابع ویدیو کال (سازگار با pytgcalls 3.0.0.dev24) ==========
+# ========== توابع ویدیو کال (سازگار با pytgcalls 2.1.0) ==========
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
@@ -145,16 +146,15 @@ async def answer_call(chat_id, call_client, video_path):
                 VideoStream(video_path)
             )
         )
-        # منتظر پایان پخش ویدیو
-        while True:
-            await asyncio.sleep(1)
-            if not call_client.is_playing(chat_id):
-                break
+        # منتظر پایان ویدیو (با تخمین مدت زمان)
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
+        duration = float(result.stdout.strip())
+        await asyncio.sleep(duration)
         await call_client.leave_call(chat_id)
     except Exception as e:
         print(f"Error answering call for {chat_id}: {e}")
 
-# ========== تبدیل ویدیو به مربع بدون حاشیه ==========
+# ========== تبدیل ویدیو به مربع ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
@@ -214,6 +214,7 @@ async def send_as_video_note(client, chat, file_path, duration, reply_to=None):
     await send_action_with_duration(client, chat, 'video', duration)
     await client.send_file(chat, file_path, video_note=True, force_document=False, reply_to=reply_to)
 
+# ========== دریافت دیالوگ‌ها و پیام‌ها ==========
 async def get_last_dialogs(user_id):
     data = await get_user_data(user_id)
     if not data or not data['session_string']:
@@ -308,7 +309,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- مکالمه لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -392,7 +393,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف (بدون تغییر) ----------
+# ---------- تنظیم چت هدف ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -474,7 +475,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- تنظیم ریپلی (بدون تغییر) ----------
+# ---------- تنظیم ریپلی ----------
 async def set_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -601,7 +602,7 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
-# ---------- وضعیت، لغو ریپلی، لغو ویدیو کال و خروج ----------
+# ---------- وضعیت و غیره ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -649,7 +650,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- تنظیم ویدیو کال (دریافت ویدیو از کاربر) ----------
+# ---------- تنظیم ویدیو کال ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -688,14 +689,13 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
             final_file_path = file_path
         await enable_auto_video(user_id, final_file_path)
-        # راه‌اندازی PyTgCalls برای این کاربر
+        # راه‌اندازی PyTgCalls
         if user_id not in call_clients:
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
             if call_client:
                 call_clients[user_id] = call_client
-                # نصب هندلر تماس ورودی (روش صحیح برای pytgcalls 3.x)
                 @call_client.on_call()
-                async def on_incoming_call(call):
+                async def on_incoming_call(call: Call):
                     if call.chat_id == user_id:
                         vid_path = (await get_user_data(user_id)).get('auto_video_path')
                         if vid_path and os.path.exists(vid_path):
@@ -705,7 +705,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         await status_msg.edit_text(f"❌ خطا: {str(e)}")
 
-# ---------- هندلر فایل (همان قبلی) ----------
+# ---------- هندلر فایل اصلی ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -799,7 +799,7 @@ async def run_web():
     await site.start()
     await asyncio.Event().wait()
 
-# ---------- بازیابی ویدیو کال ----------
+# ---------- بازیابی خودکار ویدیو کال ----------
 async def restore_auto_video_calls():
     async with await get_conn() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -816,7 +816,7 @@ async def restore_auto_video_calls():
                     if call_client:
                         call_clients[user_id] = call_client
                         @call_client.on_call()
-                        async def on_incoming_call(call):
+                        async def on_incoming_call(call: Call):
                             if call.chat_id == user_id:
                                 current_data = await get_user_data(user_id)
                                 vid_path = current_data.get('auto_video_path')
