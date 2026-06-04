@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import subprocess
+import json
 import psycopg
 from psycopg.rows import dict_row
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,8 +21,7 @@ from telethon.tl.types import (
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
 from pytgcalls import PyTgCalls
-from pytgcalls.types import Update as CallUpdate, Call
-from pytgcalls.types.stream import StreamVideoEnded
+from pytgcalls.types import Update as CallUpdate
 from pytgcalls.types.input_stream import AudioStream, VideoStream, InputStream
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -110,7 +110,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== توابع ویدیو کال (سازگار با pytgcalls 2.1.0) ==========
+# ========== توابع ویدیو کال (سازگار با pytgcalls 3.0.0.dev24) ==========
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
@@ -145,17 +145,11 @@ async def answer_call(chat_id, call_client, video_path):
                 VideoStream(video_path)
             )
         )
-        # Wait for video to finish
+        # منتظر پایان پخش ویدیو
         while True:
             await asyncio.sleep(1)
-            # Check if still playing (there's no direct method, so we sleep for duration)
-            # Instead, we can assume the video duration and leave after that.
-            # Let's get duration using ffprobe
-            import json
-            result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path], capture_output=True, text=True)
-            duration = float(result.stdout.strip())
-            await asyncio.sleep(duration)
-            break
+            if not call_client.is_playing(chat_id):
+                break
         await call_client.leave_call(chat_id)
     except Exception as e:
         print(f"Error answering call for {chat_id}: {e}")
@@ -699,13 +693,13 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
             if call_client:
                 call_clients[user_id] = call_client
-                # نصب هندلر تماس ورودی (روش صحیح برای pytgcalls 2.1.0)
+                # نصب هندلر تماس ورودی (روش صحیح برای pytgcalls 3.x)
                 @call_client.on_call()
-                async def on_incoming_call(call: Call):
+                async def on_incoming_call(call):
                     if call.chat_id == user_id:
-                        video_path = (await get_user_data(user_id)).get('auto_video_path')
-                        if video_path and os.path.exists(video_path):
-                            await answer_call(call.chat_id, call_client, video_path)
+                        vid_path = (await get_user_data(user_id)).get('auto_video_path')
+                        if vid_path and os.path.exists(vid_path):
+                            await answer_call(call.chat_id, call_client, vid_path)
         await status_msg.edit_text("✅ تنظیم ویدیو کال با موفقیت انجام شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود و پس از اتمام قطع می‌گردد.")
         await main_menu(update, context)
     except Exception as e:
@@ -822,7 +816,7 @@ async def restore_auto_video_calls():
                     if call_client:
                         call_clients[user_id] = call_client
                         @call_client.on_call()
-                        async def on_incoming_call(call: Call):
+                        async def on_incoming_call(call):
                             if call.chat_id == user_id:
                                 current_data = await get_user_data(user_id)
                                 vid_path = current_data.get('auto_video_path')
@@ -864,7 +858,6 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # هندلر تنظیم ویدیو کال
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_auto_video_start, pattern='^set_auto_video$')],
         states={},
