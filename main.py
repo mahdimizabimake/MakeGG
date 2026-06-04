@@ -22,11 +22,30 @@ from telethon.tl.types import (
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
 from pyrogram import Client as PyroClient
+import pyrogram.errors as pyrogram_errors
+
+# Compatibility fix for some PyTgCalls + Pyrogram combinations.
+# Newer/forked Pyrogram builds may not expose GroupcallForbidden, while
+# some PyTgCalls versions import it directly during startup.
+if not hasattr(pyrogram_errors, "GroupcallForbidden"):
+    pyrogram_errors.GroupcallForbidden = getattr(
+        pyrogram_errors,
+        "BadRequest",
+        getattr(pyrogram_errors, "RPCError", Exception)
+    )
+
+if not hasattr(pyrogram_errors, "GroupCallForbidden"):
+    pyrogram_errors.GroupCallForbidden = pyrogram_errors.GroupcallForbidden
+
 try:
-    from pyrogram.storage import Storage
-    PYROGRAM_SESSION_STRING_FORMAT = getattr(Storage, "SESSION_STRING_FORMAT", ">BI?256sQ?")
+    from pyrogram.storage.storage import SESSION_STRING_FORMAT as PYROGRAM_SESSION_STRING_FORMAT
 except Exception:
-    PYROGRAM_SESSION_STRING_FORMAT = ">BI?256sQ?"
+    try:
+        from pyrogram.storage import Storage
+        PYROGRAM_SESSION_STRING_FORMAT = getattr(Storage, "SESSION_STRING_FORMAT", ">BI?256sQ?")
+    except Exception:
+        PYROGRAM_SESSION_STRING_FORMAT = ">BI?256sQ?"
+
 from pytgcalls import PyTgCalls
 from pytgcalls.types import Call, MediaStream
 
