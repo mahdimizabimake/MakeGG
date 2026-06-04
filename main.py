@@ -12,31 +12,37 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, filters, ContextTypes
 )
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import SetTypingRequest, GetHistoryRequest
 from telethon.tl.types import (
     SendMessageRecordAudioAction, SendMessageUploadAudioAction,
     SendMessageRecordVideoAction, SendMessageUploadVideoAction,
-    Message
+    Message, UpdatePhoneCall, PhoneCallRequested, PhoneCallAccepted,
+    PhoneCallWaiting, PhoneCallDiscarded
 )
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from aiohttp import web
-from pyrogram import Client as PyroClient
-import pyrogram.errors as pyrogram_errors
+try:
+    import pyrogram.errors as pyrogram_errors
 
-# Compatibility fix for some PyTgCalls + Pyrogram combinations.
-# Newer/forked Pyrogram builds may not expose GroupcallForbidden, while
-# some PyTgCalls versions import it directly during startup.
-if not hasattr(pyrogram_errors, "GroupcallForbidden"):
-    pyrogram_errors.GroupcallForbidden = getattr(
-        pyrogram_errors,
-        "BadRequest",
-        getattr(pyrogram_errors, "RPCError", Exception)
-    )
+    # Compatibility fix for some PyTgCalls + Pyrogram combinations.
+    # Newer/forked Pyrogram builds may not expose GroupcallForbidden, while
+    # some PyTgCalls versions import it directly during startup.
+    if not hasattr(pyrogram_errors, "GroupcallForbidden"):
+        pyrogram_errors.GroupcallForbidden = getattr(
+            pyrogram_errors,
+            "BadRequest",
+            getattr(pyrogram_errors, "RPCError", Exception)
+        )
 
-if not hasattr(pyrogram_errors, "GroupCallForbidden"):
-    pyrogram_errors.GroupCallForbidden = pyrogram_errors.GroupcallForbidden
+    if not hasattr(pyrogram_errors, "GroupCallForbidden"):
+        pyrogram_errors.GroupCallForbidden = pyrogram_errors.GroupcallForbidden
+except Exception:
+    # v5 uses Telethon as the MTProto backend. Pyrogram is only patched here
+    # when it exists because some PyTgCalls builds import the Pyrogram bridge
+    # during module loading.
+    pass
 
 try:
     from pyrogram.storage.storage import SESSION_STRING_FORMAT as PYROGRAM_SESSION_STRING_FORMAT
@@ -159,6 +165,8 @@ async def clear_reply(user_id):
 
 # ========== ویدیو کال ==========
 call_clients = {}
+call_mtproto_clients = {}
+active_call_answers = set()
 
 async def enable_auto_video(user_id, video_path):
     async with await get_conn() as conn:
@@ -201,19 +209,64 @@ async def telethon_to_pyrogram_session(session_string, api_id, api_hash):
         await client.disconnect()
 
 async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
-    pyro_session_string = await telethon_to_pyrogram_session(session_string, api_id, api_hash)
+    """Start a persistent user MTProto client for incoming call updates.
 
-    pyro_client = PyroClient(
-        name=f"user_{user_id}",
-        api_id=int(api_id),
-        api_hash=api_hash,
-        session_string=pyro_session_string,
-        in_memory=True
+    v5 uses Telethon directly for PyTgCalls instead of converting the Telethon
+    session to Pyrogram. This is more reliable for this project because login
+    already creates a Telethon StringSession, and PyTgCalls supports Telethon
+    MTProto clients.
+    """
+    telethon_client = TelegramClient(
+        StringSession(session_string),
+        int(api_id),
+        api_hash,
+        connection_retries=None,
+        auto_reconnect=True,
     )
-    await pyro_client.start()
+    await telethon_client.connect()
 
-    call_client = PyTgCalls(pyro_client)
+    me = await telethon_client.get_me()
+    if not me:
+        await telethon_client.disconnect()
+        raise Exception("Telethon session is not authorized. Please login again.")
+
+    print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
+
+    call_client = PyTgCalls(telethon_client)
+
+    async def raw_phone_update_logger(update):
+        try:
+            update_name = update.__class__.__name__
+            if "PhoneCall" in update_name:
+                print(f"TELETHON RAW PHONE UPDATE for owner {user_id}: {update!r}", flush=True)
+
+            if isinstance(update, UpdatePhoneCall):
+                phone_call = getattr(update, "phone_call", None)
+                print(
+                    f"TELETHON UpdatePhoneCall for owner {user_id}: "
+                    f"{phone_call.__class__.__name__ if phone_call else None} {phone_call!r}",
+                    flush=True,
+                )
+
+                if isinstance(phone_call, PhoneCallRequested):
+                    caller_id = getattr(phone_call, "admin_id", None)
+                    print(
+                        f"Incoming PhoneCallRequested detected for owner {user_id}; caller={caller_id}",
+                        flush=True,
+                    )
+                    if caller_id is not None:
+                        asyncio.create_task(answer_incoming_private_call(user_id, int(caller_id), "telethon_raw"))
+        except Exception as e:
+            print(f"Telethon raw phone update logger error for owner {user_id}: {e}", flush=True)
+
+    # Register our raw logger after PyTgCalls is created. PyTgCalls registers
+    # its own raw handler during construction; registering after it lets the
+    # internal phone-call cache be filled before we call play().
+    telethon_client.add_event_handler(raw_phone_update_logger, events.Raw)
+
     await maybe_await(call_client.start())
+    call_mtproto_clients[user_id] = telethon_client
+    print(f"PyTgCalls started with Telethon backend for owner {user_id}", flush=True)
     return call_client
 
 async def get_video_duration(video_path):
@@ -362,38 +415,64 @@ def is_incoming_private_call_update(update):
 def register_incoming_call_handler(call_client, user_id):
     async def on_incoming_call(*args):
         update = args[-1] if args else None
-        print(f"PyTgCalls update received for user {user_id}: {update!r}")
+        print(f"PyTgCalls update received for user {user_id}: {update!r}", flush=True)
 
         if not is_incoming_private_call_update(update):
             return
 
         chat_id = get_update_chat_id(update)
         if chat_id is None:
-            print(f"Incoming private call update without user_id/chat_id: {update!r}")
+            print(f"Incoming private call update without user_id/chat_id: {update!r}", flush=True)
             return
 
         data = await get_user_data(user_id)
         vid_path = data.get('auto_video_path') if data else None
         if vid_path and os.path.exists(vid_path):
-            print(f"Incoming private call from {chat_id}; answering with {vid_path}")
-            await answer_call(chat_id, call_clients[user_id], vid_path)
+            print(f"Incoming private call from {chat_id}; answering with {vid_path}", flush=True)
+            await answer_incoming_private_call(user_id, int(chat_id), "pytgcalls_update")
         else:
-            print(f"Incoming private call from {chat_id}, but video path is missing: {vid_path}")
+            print(f"Incoming private call from {chat_id}, but video path is missing: {vid_path}", flush=True)
 
     if hasattr(call_client, "on_call"):
         call_client.on_call()(on_incoming_call)
-        print(f"Registered incoming call handler via on_call for user {user_id}")
+        print(f"Registered incoming call handler via on_call for user {user_id}", flush=True)
         return
 
     if hasattr(call_client, "on_update"):
         call_client.on_update()(on_incoming_call)
-        print(f"Registered incoming call handler via on_update for user {user_id}")
+        print(f"Registered incoming call handler via on_update for user {user_id}", flush=True)
         return
 
     raise Exception(
         "نسخه PyTgCalls نصب‌شده نه on_call دارد و نه on_update. "
         "پکیج py-tgcalls را آپدیت کنید."
     )
+
+async def answer_incoming_private_call(user_id, caller_id, source="unknown"):
+    key = (int(user_id), int(caller_id))
+    if key in active_call_answers:
+        print(f"Duplicate incoming-call answer ignored from {source}: owner={user_id}, caller={caller_id}", flush=True)
+        return
+
+    active_call_answers.add(key)
+    try:
+        data = await get_user_data(user_id)
+        vid_path = data.get('auto_video_path') if data else None
+        call_client = call_clients.get(user_id)
+
+        if not call_client:
+            print(f"Incoming call from {caller_id}, but PyTgCalls client is missing for owner {user_id}", flush=True)
+            return
+        if not vid_path or not os.path.exists(vid_path):
+            print(f"Incoming call from {caller_id}, but video path is missing for owner {user_id}: {vid_path}", flush=True)
+            return
+
+        print(f"Answering incoming private call from {caller_id} for owner {user_id} using {source}: {vid_path}", flush=True)
+        await answer_call(caller_id, call_client, vid_path)
+    except Exception as e:
+        print(f"Error in answer_incoming_private_call owner={user_id}, caller={caller_id}, source={source}: {e}", flush=True)
+    finally:
+        active_call_answers.discard(key)
 
 async def answer_call(chat_id, call_client, video_path):
     try:
@@ -425,6 +504,7 @@ async def restore_auto_video_calls():
                     if call_client:
                         call_clients[user_id] = call_client
                         register_incoming_call_handler(call_client, user_id)
+                        print(f"Restored auto-video call receiver for owner {user_id}", flush=True)
 
 # ========== تبدیل ویدیو به مربع با استفاده از asyncio.create_subprocess_exec ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
@@ -939,8 +1019,14 @@ async def disable_auto_video_callback(update: Update, context: ContextTypes.DEFA
     await disable_auto_video(user_id)
     if user_id in call_clients:
         try:
-            await call_clients[user_id].stop()
+            await maybe_await(call_clients[user_id].stop())
             del call_clients[user_id]
+        except:
+            pass
+    if user_id in call_mtproto_clients:
+        try:
+            await call_mtproto_clients[user_id].disconnect()
+            del call_mtproto_clients[user_id]
         except:
             pass
     await query.edit_message_text("✅ قابلیت ویدیو کال غیرفعال شد.")
@@ -954,8 +1040,14 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(user_id, session_string="")
     if user_id in call_clients:
         try:
-            await call_clients[user_id].stop()
+            await maybe_await(call_clients[user_id].stop())
             del call_clients[user_id]
+        except:
+            pass
+    if user_id in call_mtproto_clients:
+        try:
+            await call_mtproto_clients[user_id].disconnect()
+            del call_mtproto_clients[user_id]
         except:
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
@@ -1012,6 +1104,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             if call_client:
                 call_clients[user_id] = call_client
                 register_incoming_call_handler(call_client, user_id)
+                print(f"Auto-video call receiver is ready for owner {user_id}", flush=True)
 
         await status_msg.edit_text("✅ ویدیو با موفقیت تنظیم شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود.")
         if os.path.exists(file_path) and file_path != final_file_path:
