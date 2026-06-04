@@ -23,7 +23,6 @@ from pyrogram import Client as PyroClient
 from pytgcalls import PyTgCalls
 from pytgcalls.types import Call, MediaStream
 
-# ========== متغیرهای محیطی ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 API_ID = int(os.environ.get('API_ID', 0))
@@ -34,7 +33,6 @@ if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
 FFMPEG_PATH = "ffmpeg"
 FFPROBE_PATH = "ffprobe"
 
-# مراحل مکالمه
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 AUTO_VIDEO_STATE = 10
@@ -139,18 +137,24 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     await call_client.start()
     return call_client
 
+async def get_video_duration(video_path):
+    """گرفتن مدت زمان ویدیو با ffprobe بدون خطای unpack"""
+    cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        return 30
+    try:
+        return float(stdout.decode().strip())
+    except:
+        return 30
+
 async def answer_call(chat_id, call_client, video_path):
     try:
         await call_client.answer_call(chat_id)
         await call_client.play(chat_id, MediaStream(video_path))
-        result = subprocess.run([FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
-                                 "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-                                capture_output=True, text=True)
-        duration = 30
-        try:
-            duration = float(result.stdout.strip())
-        except:
-            pass
+        duration = await get_video_duration(video_path)
         await asyncio.sleep(duration)
         try:
             await call_client.leave_call(chat_id)
@@ -182,23 +186,36 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع با asyncio.create_subprocess_exec ==========
+# ========== تبدیل ویدیو به مربع (با asyncio.subprocess) ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
+        # بررسی وجود ffmpeg
         proc = await asyncio.create_subprocess_exec(FFMPEG_PATH, '-version', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         await proc.wait()
     except:
         raise Exception("ffmpeg not found")
+    
+    # استفاده از مسیرهای مطلق
+    input_abs = os.path.abspath(input_path)
+    output_abs = os.path.abspath(output_path)
+    
     cmd = [
-        FFMPEG_PATH, '-i', input_path,
-        '-vf', f'crop=min(iw\\,ih):min(iw\\,ih),scale={target_size}:{target_size}',
-        '-c:a', 'copy', '-y', output_path
+        FFMPEG_PATH, '-i', input_abs,
+        '-vf', f'crop=min(iw,ih):min(iw,ih),scale={target_size}:{target_size}',
+        '-c:a', 'copy', '-y', output_abs
     ]
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
+    
     if process.returncode != 0:
-        raise Exception(f"ffmpeg error: {stderr.decode()}")
-    return output_path
+        error_msg = stderr.decode('utf-8', errors='ignore')
+        raise Exception(f"ffmpeg error: {error_msg[:200]}")
+    
+    if not os.path.exists(output_abs):
+        raise Exception("Output file not created")
+    
+    return output_abs
 
 # ========== توابع کمکی Telethon ==========
 async def get_input_entity_safe(client, identifier):
@@ -337,7 +354,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -706,7 +723,6 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        # دانلود با روش استاندارد
         await status_msg.edit_text("📥 در حال دانلود ویدیو...")
         file = await update.message.video.get_file()
         file_path = str(await file.download_to_drive())
@@ -746,7 +762,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await status_msg.edit_text(f"❌ خطا: {str(e)}")
         return AUTO_VIDEO_STATE
 
-# ---------- هندلر فایل عمومی (ارسال به چت هدف) ----------
+# ---------- هندلر فایل عمومی ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
@@ -827,7 +843,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ========== وب سرور و اجرای اصلی ==========
+# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
