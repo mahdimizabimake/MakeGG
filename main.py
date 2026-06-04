@@ -31,6 +31,7 @@ API_HASH = os.environ.get('API_HASH', '')
 if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
     raise Exception("BOT_TOKEN, DATABASE_URL, API_ID, API_HASH are required")
 
+# ========== مسیر ffmpeg (در Docker، ffmpeg در PATH است) ==========
 FFMPEG_PATH = "ffmpeg"
 FFPROBE_PATH = "ffprobe"
 
@@ -39,7 +40,7 @@ API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CH
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 AUTO_VIDEO_STATE = 10
 
-# ========== دیتابیس (بدون تغییر) ==========
+# ========== دیتابیس ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -143,9 +144,13 @@ async def answer_call(chat_id, call_client, video_path):
     try:
         await call_client.answer_call(chat_id)
         await call_client.play(chat_id, MediaStream(video_path))
-        result = subprocess.run([FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
-                                 "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-                                capture_output=True, text=True)
+        # دریافت مدت زمان ویدیو با ffprobe
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True
+        )
         duration = 30
         try:
             duration = float(result.stdout.strip())
@@ -182,10 +187,12 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع ==========
+# ========== تبدیل ویدیو به مربع با استفاده از asyncio.to_thread ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
+    """تبدیل ویدیو به مربع با برش از مرکز بدون حاشیه"""
+    # بررسی وجود ffmpeg
     try:
-        subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
+        await asyncio.to_thread(subprocess.run, [FFMPEG_PATH, '-version'], capture_output=True, check=True)
     except:
         raise Exception("ffmpeg not found")
     cmd = [
@@ -193,10 +200,10 @@ async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
         '-vf', f'crop=min(iw\\,ih):min(iw\\,ih),scale={target_size}:{target_size}',
         '-c:a', 'copy', '-y', output_path
     ]
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    _, stderr = await process.communicate()
+    # اجرای دستور در ترد جداگانه
+    process = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
     if process.returncode != 0:
-        raise Exception(f"ffmpeg error: {stderr.decode()}")
+        raise Exception(f"ffmpeg error: {process.stderr}")
     return output_path
 
 # ========== توابع کمکی Telethon ==========
@@ -336,7 +343,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین ----------
+# ---------- لاگین (بدون تغییر) ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -629,7 +636,7 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
-# ---------- وضعیت، خروج ----------
+# ---------- وضعیت و خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -677,7 +684,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ========== تنظیم ویدیو کال (نسخه اصلاح شده با مدیریت خطای دانلود) ==========
+# ---------- تنظیم ویدیو کال (با دانلود استاندارد) ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -705,7 +712,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        # دانلود با روش استاندارد python-telegram-bot (مثل handle_file)
+        # دانلود با روش استاندارد (مثل handle_file)
         await status_msg.edit_text("📥 در حال دانلود ویدیو...")
         file = await update.message.video.get_file()
         file_path = str(await file.download_to_drive())
@@ -826,7 +833,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ========== وب سرور ==========
+# ========== وب سرور و اجرای اصلی ==========
 async def health_check(request):
     return web.Response(text="OK")
 
