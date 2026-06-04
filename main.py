@@ -39,7 +39,7 @@ API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CH
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
 AUTO_VIDEO_STATE = 10  # مرحله اختصاصی برای دریافت ویدیوی تنظیم تماس
 
-# ========== دیتابیس (با ستون‌های ویدیو کال) ==========
+# ========== دیتابیس ==========
 async def get_conn():
     return await psycopg.AsyncConnection.connect(DATABASE_URL)
 
@@ -183,7 +183,7 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع ==========
+# ========== تبدیل ویدیو به مربع (بدون حاشیه) ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
@@ -337,7 +337,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-# ---------- لاگین (بدون تغییر) ----------
+# ---------- لاگین ----------
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("api_id را وارد کنید:")
@@ -421,7 +421,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"رمز اشتباه: {e}")
         return PASSWORD_STATE
 
-# ---------- تنظیم چت هدف (همان قبل) ----------
+# ---------- تنظیم چت هدف ----------
 async def set_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -503,7 +503,7 @@ async def set_target_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.disconnect()
     return ConversationHandler.END
 
-# ---------- تنظیم ریپلی (همان قبل) ----------
+# ---------- تنظیم ریپلی ----------
 async def set_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -692,7 +692,6 @@ async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # این ویدیو را به چت هدف ارسال نکن!
     status_msg = await update.message.reply_text("🔄 در حال پردازش ویدیو برای ویدیو کال...")
     try:
         data = await get_user_data(user_id)
@@ -706,9 +705,24 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         if duration > 60:
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
-        await status_msg.edit_text("📥 در حال دانلود ویدیو...")
-        file = await update.message.video.get_file()
-        file_path = str(await file.download_to_drive())
+
+        # دانلود با استفاده از Telethon (برای جلوگیری از خطای unpack)
+        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
+        file_id = update.message.video.file_id
+        client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
+        await client.connect()
+        if not await ensure_session_active(client):
+            await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
+            await client.disconnect()
+            return ConversationHandler.END
+        # دریافت مسیر فایل با استفاده از متد download_media (با file_id)
+        file_path = await client.download_media(file_id)
+        await client.disconnect()
+        if not file_path or not os.path.exists(file_path):
+            await status_msg.edit_text("❌ خطا در دانلود فایل.")
+            return AUTO_VIDEO_STATE
+        file_path = str(file_path)
+
         await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
         try:
@@ -717,8 +731,10 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
             final_file_path = file_path
+
         # ذخیره مسیر در دیتابیس
         await enable_auto_video(user_id, final_file_path)
+
         # راه‌اندازی PyTgCalls اگر قبلاً نبود
         if user_id not in call_clients:
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
@@ -731,11 +747,12 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
                         vid_path = current_data.get('auto_video_path')
                         if vid_path and os.path.exists(vid_path):
                             await answer_call(call.chat_id, call_clients[user_id], vid_path)
+
         await status_msg.edit_text("✅ ویدیو با موفقیت تنظیم شد.\nاز این به بعد هر تماس ویدیویی به شما، با این ویدیو پاسخ داده می‌شود.")
-        # پاک کردن فایل‌های موقت
+        # پاک کردن فایل اصلی اگر متفاوت است
         if os.path.exists(file_path) and file_path != final_file_path:
             os.remove(file_path)
-        # پایان مکالمه و بازگشت به منو
+        # بازگشت به منو
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
@@ -744,14 +761,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
 
 # ---------- هندلر فایل عمومی (ارسال به چت هدف) ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # اگر در حال حاضر در مکالمه تنظیم ویدیو کال هستیم، این هندلر نباید اجرا شود
-    # اما برای اطمینان، یک چک ساده می‌کنیم:
-    # (python-telegram-bot خودش از مکالمه جلوگیری می‌کند، ولی یک بار دیگر اطمینان حاصل می‌کنیم)
     user_id = update.effective_user.id
-    # بررسی می‌کنیم آیا کاربر در مرحله AUTO_VIDEO_STATE است؟
-    # (ایده‌آل نیست، اما می‌توان از context.user_data استفاده کرد)
-    if context.user_data.get('in_auto_video'):
-        return
     status_msg = await update.message.reply_text("🔄 در حال پردازش...")
     try:
         data = await get_user_data(user_id)
@@ -847,7 +857,7 @@ async def main():
     await init_db()
     await restore_auto_video_calls()
     application = Application.builder().token(BOT_TOKEN).build()
-    # مکالمه لاگین
+    # لاگین
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern='^login$')],
         states={
@@ -881,7 +891,7 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم ویدیو کال (مکالمه جداگانه)
+    # تنظیم ویدیو کال
     auto_video_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_auto_video_start, pattern='^set_auto_video$')],
         states={
@@ -896,7 +906,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(disable_auto_video_callback, pattern='^disable_auto_video$'))
     application.add_handler(CallbackQueryHandler(logout_callback, pattern='^logout$'))
     application.add_handler(CommandHandler('start', start))
-    # هندلر فایل عمومی (برای ارسال به چت هدف)
+    # هندلر فایل عمومی
     application.add_handler(MessageHandler(filters.AUDIO | filters.VIDEO | filters.VOICE | filters.VIDEO_NOTE, handle_file))
     await application.initialize()
     await application.start()
