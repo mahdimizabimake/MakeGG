@@ -37,7 +37,7 @@ FFPROBE_PATH = "ffprobe"
 # مراحل مکالمه
 API_ID_STATE, API_HASH_STATE, PHONE_STATE, CODE_STATE, PASSWORD_STATE, TARGET_CHAT_STATE = range(6)
 REPLY_METHOD_STATE, REPLY_SELECT_CHAT_STATE, REPLY_SELECT_MSG_STATE, REPLY_LINK_STATE = range(6, 10)
-AUTO_VIDEO_STATE = 10  # مرحله اختصاصی برای دریافت ویدیوی تنظیم تماس
+AUTO_VIDEO_STATE = 10
 
 # ========== دیتابیس ==========
 async def get_conn():
@@ -117,7 +117,7 @@ async def clear_reply(user_id):
             await cur.execute('UPDATE user_data SET reply_chat_id = NULL, reply_msg_id = NULL, reply_active = FALSE WHERE user_id = %s', (user_id,))
             await conn.commit()
 
-# ========== توابع ویدیو کال ==========
+# ========== ویدیو کال ==========
 call_clients = {}
 
 async def enable_auto_video(user_id, video_path):
@@ -143,7 +143,6 @@ async def answer_call(chat_id, call_client, video_path):
     try:
         await call_client.answer_call(chat_id)
         await call_client.play(chat_id, MediaStream(video_path))
-        # گرفتن مدت زمان ویدیو
         result = subprocess.run([FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
                                  "-of", "default=noprint_wrappers=1:nokey=1", video_path],
                                 capture_output=True, text=True)
@@ -183,7 +182,7 @@ async def restore_auto_video_calls():
                                 if vid_path and os.path.exists(vid_path):
                                     await answer_call(call.chat_id, call_clients[user_id], vid_path)
 
-# ========== تبدیل ویدیو به مربع (بدون حاشیه) ==========
+# ========== تبدیل ویدیو به مربع ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
     try:
         subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
@@ -630,7 +629,7 @@ async def reply_select_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ گزینه نامعتبر.")
         return ConversationHandler.END
 
-# ---------- وضعیت، خروج، و غیره ----------
+# ---------- وضعیت، خروج ----------
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -678,7 +677,7 @@ async def logout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await query.edit_message_text("✅ از اکانت خارج شدید.")
 
-# ---------- تنظیم ویدیو کال (مکالمه جداگانه) ----------
+# ---------- تنظیم ویدیو کال (اصلاح شده) ----------
 async def set_auto_video_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -706,38 +705,29 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text("❌ ویدیو نباید بیشتر از 60 ثانیه باشد.")
             return AUTO_VIDEO_STATE
 
-        # دانلود فایل با روش مقاوم (اول python-telegram-bot، در صورت خطا از telethon)
-        file_path = None
-        try:
-            await status_msg.edit_text("📥 در حال دانلود ویدیو...")
-            file = await update.message.video.get_file()
-            file_path = str(await file.download_to_drive())
-        except Exception as e:
-            if "unpack requires a buffer" in str(e):
-                await status_msg.edit_text("📥 روش جایگزین: دانلود با Telethon...")
-                client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
-                await client.connect()
-                if not await ensure_session_active(client):
-                    await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
-                    await client.disconnect()
-                    return ConversationHandler.END
-                # دریافت پیام با استفاده از message_id
-                msg_id = update.message.message_id
-                chat_id = update.effective_chat.id
-                tele_msg = await client.get_messages(chat_id, ids=msg_id)
-                if tele_msg and tele_msg.media:
-                    file_path = await tele_msg.download_media()
-                await client.disconnect()
-                if not file_path:
-                    await status_msg.edit_text("❌ خطا در دانلود فایل با روش جایگزین.")
-                    return AUTO_VIDEO_STATE
-                file_path = str(file_path)
-            else:
-                raise e
-
+        # دانلود فقط با Telethon (اجتناب از خطای unpack)
+        await status_msg.edit_text("📥 در حال دانلود ویدیو با Telethon...")
+        client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
+        await client.connect()
+        if not await ensure_session_active(client):
+            await status_msg.edit_text("❌ نشست منقضی شده. لطفاً دوباره لاگین کنید.")
+            await client.disconnect()
+            return ConversationHandler.END
+        
+        # دریافت message_id و chat_id (چت خصوصی با ربات)
+        msg_id = update.message.message_id
+        chat_id = update.effective_chat.id
+        tele_msg = await client.get_messages(chat_id, ids=msg_id)
+        if not tele_msg or not tele_msg.media:
+            await status_msg.edit_text("❌ پیام یا رسانه یافت نشد.")
+            await client.disconnect()
+            return AUTO_VIDEO_STATE
+        file_path = await tele_msg.download_media()
+        await client.disconnect()
         if not file_path or not os.path.exists(file_path):
             await status_msg.edit_text("❌ خطا در دانلود فایل.")
             return AUTO_VIDEO_STATE
+        file_path = str(file_path)
 
         await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
         square_path = file_path + "_square.mp4"
@@ -745,7 +735,7 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await convert_to_square_ffmpeg(file_path, square_path)
             final_file_path = square_path
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. ارسال ویدیوی اصلی...")
+            await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)}. استفاده از ویدیوی اصلی...")
             final_file_path = file_path
 
         await enable_auto_video(user_id, final_file_path)
@@ -852,7 +842,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
-# ========== وب سرور و اجرای اصلی ==========
+# ========== وب سرور ==========
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -881,7 +871,7 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم چت هدف
+    # چت هدف
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_target_start, pattern='^set_target$')],
         states={
@@ -892,7 +882,7 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم ریپلی
+    # ریپلی
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(set_reply_start, pattern='^set_reply$')],
         states={
@@ -903,7 +893,7 @@ async def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
-    # تنظیم ویدیو کال
+    # ویدیو کال
     auto_video_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_auto_video_start, pattern='^set_auto_video$')],
         states={
@@ -912,7 +902,7 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(auto_video_conv)
-    # دکمه‌های دیگر
+    # سایر دکمه‌ها
     application.add_handler(CallbackQueryHandler(status_callback, pattern='^status$'))
     application.add_handler(CallbackQueryHandler(clear_reply_callback, pattern='^clear_reply$'))
     application.add_handler(CallbackQueryHandler(disable_auto_video_callback, pattern='^disable_auto_video$'))
