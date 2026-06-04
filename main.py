@@ -590,6 +590,120 @@ async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
 
     return output_abs
 
+async def detect_content_crop_ffmpeg(input_path, sample_seconds=6):
+    """Detect and remove baked-in black bars before making a video note.
+
+    Returns an FFmpeg crop expression such as crop=720:720:0:280, or None.
+    This is only a best-effort helper; the final video-note conversion still
+    uses scale+crop=increase, so it never pads with black borders.
+    """
+    input_abs = os.path.abspath(input_path)
+    cmd = [
+        FFMPEG_PATH,
+        '-hide_banner',
+        '-ss', '0',
+        '-t', str(sample_seconds),
+        '-i', input_abs,
+        '-vf', 'cropdetect=limit=24:round=2:reset=1',
+        '-an',
+        '-f', 'null',
+        '-'
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        text = stderr.decode('utf-8', errors='ignore')
+        crops = re.findall(r'crop=(\d+:\d+:\d+:\d+)', text)
+        if not crops:
+            return None
+
+        # Use the last stable crop detected by FFmpeg. Earlier frames can be
+        # blank/fading and may produce inaccurate crop values.
+        crop_value = crops[-1]
+        w, h, x, y = [int(part) for part in crop_value.split(':')]
+        if w <= 0 or h <= 0:
+            return None
+        return f'crop={w}:{h}:{x}:{y}'
+    except Exception as e:
+        print(f"cropdetect failed, continuing without black-bar pre-crop: {e}", flush=True)
+        return None
+
+async def convert_to_video_note_ffmpeg(input_path, output_path, target_size=480):
+    """Convert any video to a clean Telegram round video note.
+
+    Important details:
+    - No padding is used, so FFmpeg never creates black borders.
+    - scale=...:force_original_aspect_ratio=increase fills the square.
+    - crop=target:target cuts the overflow from the center.
+    - cropdetect is used first to remove black bars already baked into the file.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            FFMPEG_PATH, '-version',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc.wait()
+    except Exception as e:
+        raise Exception(f"ffmpeg not found or not executable: {e}")
+
+    input_abs = os.path.abspath(input_path)
+    output_abs = os.path.abspath(output_path)
+
+    pre_crop = await detect_content_crop_ffmpeg(input_abs)
+    filters = []
+    if pre_crop:
+        filters.append(pre_crop)
+
+    # This is the key part for video notes: fill the whole square, then crop.
+    # Do not use pad here; padding is what creates black side bars.
+    filters.extend([
+        f'scale={target_size}:{target_size}:force_original_aspect_ratio=increase',
+        f'crop={target_size}:{target_size}',
+        'setsar=1',
+        'fps=30'
+    ])
+    video_filter = ','.join(filters)
+
+    cmd = [
+        FFMPEG_PATH,
+        '-hide_banner',
+        '-y',
+        '-i', input_abs,
+        '-map', '0:v:0',
+        '-map', '0:a?',
+        '-vf', video_filter,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'baseline',
+        '-level', '3.1',
+        '-c:a', 'aac',
+        '-b:a', '96k',
+        '-ac', '2',
+        '-ar', '44100',
+        '-movflags', '+faststart',
+        '-shortest',
+        output_abs
+    ]
+
+    print(f"Running video-note ffmpeg command: {' '.join(cmd)}", flush=True)
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+
+    if process.returncode != 0:
+        error_text = stderr.decode('utf-8', errors='ignore')
+        raise Exception(f"ffmpeg video-note error (code {process.returncode}): {error_text[:800]}")
+
+    if not os.path.exists(output_abs):
+        raise Exception("Video-note output file was not created.")
+
+    return output_abs
+
 # ========== توابع کمکی Telethon ==========
 async def get_input_entity_safe(client, identifier):
     try:
@@ -1188,13 +1302,19 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = str(await file.download_to_drive())
         final_file_path = file_path
         if is_video:
-            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به مربع (بدون حاشیه)...")
-            square_path = file_path + "_square.mp4"
+            await status_msg.edit_text("🔄 در حال تبدیل ویدیو به ویدیو نوت دایره‌ای بدون حاشیه سیاه...")
+            square_path = file_path + "_video_note.mp4"
             try:
-                final_file_path = await convert_to_square_ffmpeg(file_path, square_path)
+                final_file_path = await convert_to_video_note_ffmpeg(file_path, square_path, target_size=480)
             except Exception as e:
-                await status_msg.edit_text(f"⚠️ خطا در تبدیل: {str(e)[:200]}. ارسال ویدیوی اصلی...")
-                final_file_path = file_path
+                print(f"video-note conversion error: {e}", flush=True)
+                await status_msg.edit_text(
+                    f"❌ خطا در تبدیل ویدیو نوت: {str(e)[:300]}\n"
+                    "ویدیوی اصلی ارسال نشد چون ممکن است دایره‌ای/بدون حاشیه درست نشود."
+                )
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                return
         client = TelegramClient(StringSession(data['session_string']), data['api_id'], data['api_hash'])
         await client.connect()
         if not await ensure_session_active(client):
