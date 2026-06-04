@@ -3,4 +3,3 @@ telethon==1.34.0
 psycopg[binary]
 aiohttp==3.9.0
 pytgcalls==2.1.0
-tgcalls
