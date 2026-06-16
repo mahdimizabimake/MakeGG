@@ -1,3 +1,11 @@
+import telethon.tl.types as t
+
+print("TESTING InputGroupCallSlug")
+
+try:
+    print(t.InputGroupCallSlug)
+except Exception as e:
+    print("FAILED:", repr(e))
 import telethon
 import pytgcalls
 
