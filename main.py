@@ -241,8 +241,14 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     print("PYTGCALLS FILE:", inspect.getfile(pytgcalls), flush=True)
     print("PYTGCALLS VERSION:", getattr(pytgcalls, "__version__", "unknown"), flush=True)
     print("BEFORE PyTgCalls()", flush=True)
-    call_client = PyTgCalls(telethon_client)
-    print("AFTER PyTgCalls()", flush=True)
+    try:
+        call_client = PyTgCalls(telethon_client)
+        print("AFTER PyTgCalls()", flush=True)
+    except Exception:
+        import traceback
+        print("===== PYTGCALLS TRACEBACK =====", flush=True)
+        print(traceback.format_exc(), flush=True)
+        raise
 
     async def raw_phone_update_logger(update):
         try:
