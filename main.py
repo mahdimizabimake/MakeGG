@@ -234,13 +234,11 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
         await telethon_client.disconnect()
         raise Exception("Telethon session is not authorized. Please login again.")
 
-print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
+    print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
 
-print("BEFORE PyTgCalls()", flush=True)
-
-call_client = PyTgCalls(telethon_client)
-
-print("AFTER PyTgCalls()", flush=True)
+    print("BEFORE PyTgCalls()", flush=True)
+    call_client = PyTgCalls(telethon_client)
+    print("AFTER PyTgCalls()", flush=True)
 
     async def raw_phone_update_logger(update):
         try:
@@ -271,7 +269,9 @@ print("AFTER PyTgCalls()", flush=True)
     # internal phone-call cache be filled before we call play().
     telethon_client.add_event_handler(raw_phone_update_logger, events.Raw)
 
+    print("BEFORE call_client.start()", flush=True)
     await maybe_await(call_client.start())
+    print("AFTER call_client.start()", flush=True)
     call_mtproto_clients[user_id] = telethon_client
     print(f"PyTgCalls started with Telethon backend for owner {user_id}", flush=True)
     return call_client
