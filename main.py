@@ -236,6 +236,10 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
 
     print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
 
+    import pytgcalls
+    import inspect
+    print("PYTGCALLS FILE:", inspect.getfile(pytgcalls), flush=True)
+    print("PYTGCALLS VERSION:", getattr(pytgcalls, "__version__", "unknown"), flush=True)
     print("BEFORE PyTgCalls()", flush=True)
     call_client = PyTgCalls(telethon_client)
     print("AFTER PyTgCalls()", flush=True)
