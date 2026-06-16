@@ -236,12 +236,9 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
 
     print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
 
-    print("BEFORE PyTgCalls()", flush=True)
-
+print("BEFORE PyTgCalls()", flush=True)
 call_client = PyTgCalls(telethon_client)
-
 print("AFTER PyTgCalls()", flush=True)
-
     async def raw_phone_update_logger(update):
         try:
             update_name = update.__class__.__name__
