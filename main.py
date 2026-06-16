@@ -1,3 +1,8 @@
+import telethon
+import pytgcalls
+
+print("TELETHON VERSION:", telethon.__version__)
+print("PYTGCALLS VERSION:", getattr(pytgcalls, "__version__", "unknown"))
 import asyncio
 import base64
 import inspect
