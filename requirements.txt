@@ -1,7 +1,7 @@
 python-telegram-bot==20.7
-telethon==1.39.0
-Pyrogram==2.0.106
-TgCrypto==1.2.5
-pytgcalls==3.0.0
+telethon==1.34.0
+psycopg[binary]
 aiohttp>=3.9.3,<4.0.0
-psycopg[binary]==3.2.9
+Pyrogram==2.0.106
+TgCrypto
+git+https://github.com/pytgcalls/pytgcalls.git
