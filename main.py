@@ -1,16 +1,3 @@
-import telethon.tl.types as t
-
-print("TESTING InputGroupCallSlug")
-
-try:
-    print(t.InputGroupCallSlug)
-except Exception as e:
-    print("FAILED:", repr(e))
-import telethon
-import pytgcalls
-
-print("TELETHON VERSION:", telethon.__version__)
-print("PYTGCALLS VERSION:", getattr(pytgcalls, "__version__", "unknown"))
 import asyncio
 import base64
 import inspect
@@ -1271,9 +1258,14 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
-        error_full = str(e)
-        print(f"Full error in handle_auto_video_file: {error_full}")  # لاگ در رندر
-        await status_msg.edit_text(f"❌ خطا: {error_full[:300]}")
+        import traceback
+
+        error_full = traceback.format_exc()
+        print("\n========== VIDEO CALL TRACEBACK ==========")
+        print(error_full)
+        print("==========================================\n")
+
+        await status_msg.edit_text(f"❌ خطا: {str(e)[:300]}")
         return AUTO_VIDEO_STATE
 
 # ---------- هندلر فایل عمومی ----------
