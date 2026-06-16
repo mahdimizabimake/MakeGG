@@ -4,4 +4,4 @@ psycopg[binary]
 aiohttp>=3.9.3,<4.0.0
 Pyrogram==2.0.106
 TgCrypto
-git+https://github.com/pytgcalls/pytgcalls.git
+pytgcalls==2.3.2
