@@ -236,9 +236,7 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
 
     print(f"Telethon user client connected for owner {user_id}; logged in as {me.id}", flush=True)
 
-    print("BEFORE PYTGCALLS")
-call_client = PyTgCalls(telethon_client)
-print("AFTER PYTGCALLS")
+    call_client = PyTgCalls(telethon_client)
 
     async def raw_phone_update_logger(update):
         try:
@@ -258,9 +256,18 @@ print("AFTER PYTGCALLS")
                     caller_id = getattr(phone_call, "admin_id", None)
                     print(
                         f"Incoming PhoneCallRequested detected for owner {user_id}; caller={caller_id}. "
-                        f"Waiting for PyTgCalls INCOMING_CALL event to answer.",
+                        f"Scheduling delayed PyTgCalls.play answer from Telethon raw update.",
                         flush=True,
                     )
+                    if caller_id is not None:
+                        async def delayed_raw_answer():
+                            # Let PyTgCalls process/cache the same raw update first.
+                            # Calling play too early or retrying can make it start an outgoing
+                            # RequestCallRequest instead of accepting the incoming call.
+                            await asyncio.sleep(0.8)
+                            await answer_incoming_private_call(user_id, int(caller_id), "telethon_raw_delayed")
+
+                        asyncio.create_task(delayed_raw_answer())
         except Exception as e:
             print(f"Telethon raw phone update logger error for owner {user_id}: {e}", flush=True)
 
@@ -1260,14 +1267,9 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
         await main_menu(update, context)
         return ConversationHandler.END
     except Exception as e:
-        import traceback
-
-        error_full = traceback.format_exc()
-        print("\n========== VIDEO CALL TRACEBACK ==========")
-        print(error_full)
-        print("==========================================\n")
-
-        await status_msg.edit_text(f"❌ خطا: {str(e)[:300]}")
+        error_full = str(e)
+        print(f"Full error in handle_auto_video_file: {error_full}")  # لاگ در رندر
+        await status_msg.edit_text(f"❌ خطا: {error_full[:300]}")
         return AUTO_VIDEO_STATE
 
 # ---------- هندلر فایل عمومی ----------
