@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import subprocess
+from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -82,6 +83,9 @@ API_HASH = os.environ.get('API_HASH', '')
 if not BOT_TOKEN or not DATABASE_URL or not API_ID or not API_HASH:
     raise Exception("BOT_TOKEN, DATABASE_URL, API_ID, API_HASH are required")
 
+AUTO_VIDEO_CACHE_DIR = Path(__file__).with_name("auto_video_cache")
+AUTO_VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 FFMPEG_PATH = "ffmpeg"
 FFPROBE_PATH = "ffprobe"
 
@@ -119,6 +123,10 @@ async def init_db():
                 await conn.execute("ALTER TABLE user_data ADD COLUMN auto_video_enabled BOOLEAN DEFAULT FALSE")
             if 'auto_video_path' not in columns:
                 await conn.execute("ALTER TABLE user_data ADD COLUMN auto_video_path TEXT DEFAULT NULL")
+            if 'auto_video_bytes' not in columns:
+                await conn.execute("ALTER TABLE user_data ADD COLUMN auto_video_bytes BYTEA DEFAULT NULL")
+            if 'auto_video_filename' not in columns:
+                await conn.execute("ALTER TABLE user_data ADD COLUMN auto_video_filename TEXT DEFAULT NULL")
         await conn.commit()
 
 async def get_user_data(user_id):
@@ -126,6 +134,40 @@ async def get_user_data(user_id):
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute('SELECT * FROM user_data WHERE user_id = %s', (user_id,))
             return await cur.fetchone()
+
+
+def _auto_video_cache_path(user_id, filename=None):
+    suffix = Path(filename).suffix if filename else ".mp4"
+    if not suffix:
+        suffix = ".mp4"
+    return str(AUTO_VIDEO_CACHE_DIR / f"auto_video_{int(user_id)}{suffix}")
+
+
+async def resolve_auto_video_path(user_id):
+    data = await get_user_data(user_id)
+    if not data or not data.get("auto_video_enabled"):
+        return None
+
+    path = data.get("auto_video_path")
+    if path and os.path.exists(path):
+        return str(path)
+
+    blob = data.get("auto_video_bytes")
+    if not blob:
+        return None
+
+    filename = data.get("auto_video_filename") or "auto_video.mp4"
+    path = _auto_video_cache_path(user_id, filename)
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(bytes(blob))
+        await save_user_data(user_id, auto_video_path=path)
+        return path
+    except Exception as e:
+        print(f"Could not materialize auto video for user {user_id}: {e}", flush=True)
+        return None
+
 
 async def save_user_data(user_id, api_id=None, api_hash=None, session_string=None, target_chat_id=None, target_chat_title=None):
     async with await get_conn() as conn:
@@ -172,16 +214,29 @@ call_clients = {}
 call_mtproto_clients = {}
 active_call_answers = set()
 
-async def enable_auto_video(user_id, video_path):
+async def enable_auto_video(user_id, video_path, video_bytes, video_filename=None):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute('UPDATE user_data SET auto_video_enabled = TRUE, auto_video_path = %s WHERE user_id = %s', (video_path, user_id))
+            await cur.execute(
+                """
+                UPDATE user_data
+                SET auto_video_enabled = TRUE,
+                    auto_video_path = %s,
+                    auto_video_bytes = %s,
+                    auto_video_filename = %s
+                WHERE user_id = %s
+                """,
+                (video_path, video_bytes, video_filename, user_id),
+            )
             await conn.commit()
 
 async def disable_auto_video(user_id):
     async with await get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute('UPDATE user_data SET auto_video_enabled = FALSE, auto_video_path = NULL WHERE user_id = %s', (user_id,))
+            await cur.execute(
+                'UPDATE user_data SET auto_video_enabled = FALSE, auto_video_path = NULL, auto_video_bytes = NULL, auto_video_filename = NULL WHERE user_id = %s',
+                (user_id,),
+            )
             await conn.commit()
 
 async def telethon_to_pyrogram_session(session_string, api_id, api_hash):
@@ -282,6 +337,28 @@ async def setup_pytgcalls(user_id, session_string, api_id, api_hash):
     print("BEFORE call_client.start()", flush=True)
     await maybe_await(call_client.start())
     print("AFTER call_client.start()", flush=True)
+
+    async def raw_incoming_call_answerer(event):
+        try:
+            raw_update = getattr(event, "update", event)
+            if not isinstance(raw_update, UpdatePhoneCall):
+                return
+            phone_call = getattr(raw_update, "phone_call", None)
+            if not isinstance(phone_call, PhoneCallRequested):
+                return
+            caller_id = getattr(phone_call, "admin_id", None)
+            if caller_id is None:
+                return
+            print(
+                f"Telethon raw incoming call detected for owner {user_id}; caller={caller_id}",
+                flush=True,
+            )
+            await answer_incoming_private_call(user_id, int(caller_id), "telethon_raw")
+        except Exception as e:
+            print(f"Telethon raw incoming call handler error for owner {user_id}: {e}", flush=True)
+
+    telethon_client.add_event_handler(raw_incoming_call_answerer, events.Raw)
+
     call_mtproto_clients[user_id] = telethon_client
     print(f"PyTgCalls started with Telethon backend for owner {user_id}", flush=True)
     return call_client
@@ -460,13 +537,7 @@ def register_incoming_call_handler(call_client, user_id):
             print(f"Incoming private call update without user_id/chat_id: {update!r}", flush=True)
             return
 
-        data = await get_user_data(user_id)
-        vid_path = data.get('auto_video_path') if data else None
-        if vid_path and os.path.exists(vid_path):
-            print(f"Incoming private call from {chat_id}; answering with {vid_path}", flush=True)
-            await answer_incoming_private_call(user_id, int(chat_id), "pytgcalls_update")
-        else:
-            print(f"Incoming private call from {chat_id}, but video path is missing: {vid_path}", flush=True)
+        await answer_incoming_private_call(user_id, int(chat_id), "pytgcalls_update")
 
     if hasattr(call_client, "on_call"):
         call_client.on_call()(on_incoming_call)
@@ -491,15 +562,15 @@ async def answer_incoming_private_call(user_id, caller_id, source="unknown"):
 
     active_call_answers.add(key)
     try:
-        data = await get_user_data(user_id)
-        vid_path = data.get('auto_video_path') if data else None
         call_client = call_clients.get(user_id)
 
         if not call_client:
             print(f"Incoming call from {caller_id}, but PyTgCalls client is missing for owner {user_id}", flush=True)
             return
+
+        vid_path = await resolve_auto_video_path(user_id)
         if not vid_path or not os.path.exists(vid_path):
-            print(f"Incoming call from {caller_id}, but video path is missing for owner {user_id}: {vid_path}", flush=True)
+            print(f"Incoming call from {caller_id}, but video is unavailable for owner {user_id}", flush=True)
             return
 
         print(f"Answering incoming private call from {caller_id} for owner {user_id} using {source}: {vid_path}", flush=True)
@@ -537,20 +608,24 @@ async def answer_call(chat_id, call_client, video_path):
 async def restore_auto_video_calls():
     async with await get_conn() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute('SELECT user_id, api_id, api_hash, session_string, auto_video_path FROM user_data WHERE auto_video_enabled = TRUE AND session_string IS NOT NULL')
+            await cur.execute('SELECT user_id, api_id, api_hash, session_string, auto_video_enabled FROM user_data WHERE auto_video_enabled = TRUE AND session_string IS NOT NULL')
             active_users = await cur.fetchall()
             for user in active_users:
                 user_id = user['user_id']
                 api_id_val = user['api_id']
                 api_hash_val = user['api_hash']
                 session_str = user['session_string']
-                video_path = user['auto_video_path']
-                if video_path and os.path.exists(video_path):
-                    call_client = await setup_pytgcalls(user_id, session_str, api_id_val, api_hash_val)
-                    if call_client:
-                        call_clients[user_id] = call_client
-                        register_incoming_call_handler(call_client, user_id)
-                        print(f"Restored auto-video call receiver for owner {user_id}", flush=True)
+
+                video_path = await resolve_auto_video_path(user_id)
+                if not video_path or not os.path.exists(video_path):
+                    print(f"Skipping restore for owner {user_id}: auto video missing", flush=True)
+                    continue
+
+                call_client = await setup_pytgcalls(user_id, session_str, api_id_val, api_hash_val)
+                if call_client:
+                    call_clients[user_id] = call_client
+                    register_incoming_call_handler(call_client, user_id)
+                    print(f"Restored auto-video call receiver for owner {user_id}", flush=True)
 
 # ========== تبدیل ویدیو به مربع با استفاده از asyncio.create_subprocess_exec ==========
 async def convert_to_square_ffmpeg(input_path, output_path, target_size=480):
@@ -1257,7 +1332,15 @@ async def handle_auto_video_file(update: Update, context: ContextTypes.DEFAULT_T
             await status_msg.edit_text(f"⚠️ خطا در تبدیل: {error_detail[:200]}\nاستفاده از ویدیوی اصلی...")
             final_file_path = file_path
 
-        await enable_auto_video(user_id, final_file_path)
+        with open(final_file_path, "rb") as f:
+            video_bytes = f.read()
+
+        cache_path = _auto_video_cache_path(user_id, os.path.basename(final_file_path))
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as cache_file:
+            cache_file.write(video_bytes)
+
+        await enable_auto_video(user_id, cache_path, video_bytes, os.path.basename(final_file_path))
 
         if user_id not in call_clients:
             call_client = await setup_pytgcalls(user_id, data['session_string'], data['api_id'], data['api_hash'])
